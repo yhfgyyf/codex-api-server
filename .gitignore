@@ -5,7 +5,11 @@ __pycache__/
 dist/
 build/
 .env
+.env.*
 venv/
 *.log
+*.db
+*.sqlite
+auth.json
 .idea/
 .vscode/
