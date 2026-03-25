@@ -145,7 +145,7 @@ def _chat_to_responses(body: dict) -> dict:
         result["tool_choice"] = "auto"
         result["parallel_tool_calls"] = True
 
-    # -- Reasoning effort (OpenAI / vLLM param) --
+    # -- Reasoning (always enabled so models output thinking process) --
     reasoning_effort = body.get("reasoning_effort")
     reasoning = body.get("reasoning")
     if reasoning_effort:
@@ -156,6 +156,9 @@ def _chat_to_responses(body: dict) -> dict:
         effort = _clamp_reasoning_effort(str(effort), model)
         summary = reasoning.get("summary", "auto")
         result["reasoning"] = {"effort": effort, "summary": summary}
+    else:
+        # Default: enable reasoning with medium effort + auto summary
+        result["reasoning"] = {"effort": "medium", "summary": "auto"}
 
     # -- All other OpenAI/vLLM params are silently ignored --
     # Ignored: temperature, top_p, top_k, n, max_tokens, max_completion_tokens,
@@ -228,6 +231,18 @@ def _extract_final_text_from_response(response_obj: dict) -> str:
                 if part.get("type") in ("output_text", "text"):
                     text_parts.append(part.get("text", ""))
     return "".join(text_parts)
+
+
+def _extract_reasoning_from_response(response_obj: dict) -> str:
+    """Extract reasoning/thinking summary text from Codex response output."""
+    output = response_obj.get("output", [])
+    reasoning_parts = []
+    for item in output:
+        if item.get("type") == "reasoning":
+            for part in item.get("summary", []):
+                if part.get("type") == "summary_text":
+                    reasoning_parts.append(part.get("text", ""))
+    return "".join(reasoning_parts)
 
 
 def _extract_usage_from_response(response_obj: dict) -> dict:
@@ -306,6 +321,7 @@ class OpenAIProxy:
         url = _codex_url()
 
         full_text = ""
+        reasoning_text = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         final_response_obj = None
 
@@ -321,18 +337,24 @@ class OpenAIProxy:
                 return error_data
 
             event = data
+            event_type = event.get("type", "")
             delta = _extract_text_from_responses_event(event)
             if delta:
                 full_text += delta
-            event_type = event.get("type", "")
+            if event_type == "response.reasoning_summary_text.delta":
+                reasoning_text += event.get("delta", "")
             if event_type in ("response.completed", "response.done"):
                 final_response_obj = event.get("response", {})
                 if not full_text:
                     full_text = _extract_final_text_from_response(final_response_obj)
+                if not reasoning_text:
+                    reasoning_text = _extract_reasoning_from_response(final_response_obj)
                 usage = _extract_usage_from_response(final_response_obj)
 
         # Build response message
         message: dict = {"role": "assistant", "content": full_text or None}
+        if reasoning_text:
+            message["reasoning_content"] = reasoning_text
         finish_reason = "stop"
         if final_response_obj:
             tool_calls = _extract_tool_calls_from_response(final_response_obj)
@@ -379,6 +401,7 @@ class OpenAIProxy:
 
         sent_role = False
         collected_text = ""
+        collected_reasoning = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         status = "ok"
         has_tool_calls = False
@@ -418,6 +441,7 @@ class OpenAIProxy:
                     "response.created",
                     "response.in_progress",
                     "response.function_call_arguments.delta",
+                    "response.reasoning_summary_text.delta",
                 ):
                     sent_role = True
                     chunk = {
@@ -426,6 +450,19 @@ class OpenAIProxy:
                         "created": int(time.time()),
                         "model": model,
                         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n".encode()
+
+                # Reasoning/thinking delta → reasoning_content (DeepSeek/vLLM format)
+                if event_type == "response.reasoning_summary_text.delta":
+                    r_delta = event.get("delta", "")
+                    collected_reasoning += r_delta
+                    chunk = {
+                        "id": run_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"reasoning_content": r_delta}, "finish_reason": None}],
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
@@ -507,6 +544,7 @@ class OpenAIProxy:
             "object": "chat.completion",
             "model": model,
             "content": collected_text,
+            "reasoning_content": collected_reasoning or None,
             "usage": usage,
         }
         await save_log(
