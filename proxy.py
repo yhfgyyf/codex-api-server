@@ -178,6 +178,176 @@ def _chat_to_responses(body: dict) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Anthropic Messages API → Codex Responses conversion
+# ---------------------------------------------------------------------------
+
+def _anthropic_convert_tools(tools: list) -> list:
+    """Convert Anthropic tool definitions to Codex Responses format."""
+    codex_tools = []
+    for tool in tools:
+        codex_tools.append({
+            "type": "function",
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema", {}),
+            "strict": None,
+        })
+    return codex_tools
+
+
+def _anthropic_to_responses(body: dict) -> dict:
+    """Convert Anthropic Messages API request to Codex Responses format."""
+    model = body.get("model", "gpt-5.4")
+    messages = body.get("messages", [])
+    system = body.get("system", "")
+
+    input_items = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        # Handle tool_result blocks
+        if role == "user" and isinstance(content, list):
+            has_tool_result = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if has_tool_result:
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_result":
+                        output = block.get("content", "")
+                        if isinstance(output, list):
+                            output = "\n".join(
+                                b.get("text", "") for b in output
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        input_items.append({
+                            "type": "function_call_output",
+                            "call_id": block.get("tool_use_id", ""),
+                            "output": output if isinstance(output, str) else json.dumps(output),
+                        })
+                    elif block.get("type") == "text":
+                        input_items.append({
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": block.get("text", "")}],
+                        })
+                continue
+
+        # Extract text from content (string or array of blocks)
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            text = "\n".join(text_parts)
+        else:
+            text = str(content)
+
+        if role == "user":
+            input_items.append({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            })
+        elif role == "assistant":
+            # Check for tool_use blocks
+            if isinstance(content, list):
+                items = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text" and block.get("text"):
+                        items.append({"type": "output_text", "text": block["text"]})
+                    elif block.get("type") == "tool_use":
+                        inp = block.get("input", {})
+                        items.append({
+                            "type": "function_call",
+                            "id": block.get("id", ""),
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(inp) if isinstance(inp, dict) else str(inp),
+                        })
+                if items:
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": items,
+                    })
+                    continue
+            input_items.append({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            })
+
+    # Handle system prompt (string or array of blocks)
+    if isinstance(system, list):
+        system = "\n\n".join(
+            b.get("text", "") for b in system
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+
+    result = {
+        "model": model,
+        "store": False,
+        "stream": True,
+        "input": input_items,
+        "instructions": system or "You are a helpful assistant.",
+        "include": ["reasoning.encrypted_content"],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }
+
+    # Tools
+    tools = body.get("tools")
+    if tools:
+        result["tools"] = _anthropic_convert_tools(tools)
+        # Map Anthropic tool_choice to Codex format
+        tc = body.get("tool_choice")
+        if isinstance(tc, dict):
+            tc_type = tc.get("type", "auto")
+            if tc_type == "any":
+                result["tool_choice"] = "required"
+            elif tc_type == "tool":
+                result["tool_choice"] = {"type": "function", "name": tc.get("name", "")}
+            else:
+                result["tool_choice"] = tc_type
+        elif isinstance(tc, str):
+            result["tool_choice"] = tc
+
+    # Reasoning — map Anthropic's thinking.budget_tokens to Codex reasoning
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        budget = thinking.get("budget_tokens", 10000)
+        if budget <= 2000:
+            effort = "low"
+        elif budget <= 8000:
+            effort = "medium"
+        else:
+            effort = "high"
+        result["reasoning"] = {"effort": effort, "summary": "auto"}
+    else:
+        result["reasoning"] = {"effort": "medium", "summary": "auto"}
+
+    return result
+
+
+def _anthropic_usage(codex_usage: dict) -> dict:
+    """Convert internal usage dict to Anthropic format."""
+    return {
+        "input_tokens": codex_usage.get("prompt_tokens", 0),
+        "output_tokens": codex_usage.get("completion_tokens", 0),
+    }
+
+
 # Parameters that the Codex Responses API actually accepts
 _CODEX_RESPONSES_ALLOWED_KEYS = {
     "model", "store", "stream", "instructions", "input", "include",
@@ -658,3 +828,277 @@ class OpenAIProxy:
             total_tokens=usage.get("total_tokens", 0),
             duration_ms=duration_ms,
         )
+
+    # -------------------------------------------------------------------
+    # Anthropic Messages API
+    # -------------------------------------------------------------------
+
+    async def anthropic_messages(self, body: dict) -> dict:
+        """Non-streaming Anthropic Messages API via Codex Responses."""
+        t0 = time.monotonic()
+        codex_body = _anthropic_to_responses(body)
+        model = body.get("model", "gpt-5.4")
+        msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+        url = _codex_url()
+
+        full_text = ""
+        reasoning_text = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        final_response_obj = None
+        tool_calls: list[dict] = []
+
+        async for kind, data in self._stream_with_retry(url, codex_body):
+            if kind == "error":
+                try:
+                    error_data = json.loads(data)
+                except Exception:
+                    error_data = {"error": {"message": data.decode(errors="replace"), "type": "api_error"}}
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                err_resp = {
+                    "type": "error",
+                    "error": {
+                        "type": error_data.get("error", {}).get("type", "api_error"),
+                        "message": error_data.get("error", {}).get("message", str(error_data)),
+                    },
+                }
+                await save_log(msg_id, "messages", model, False, body, err_resp,
+                               status="error", duration_ms=duration_ms)
+                return err_resp
+
+            event = data
+            event_type = event.get("type", "")
+            delta = _extract_text_from_responses_event(event)
+            if delta:
+                full_text += delta
+            if event_type == "response.reasoning_summary_text.delta":
+                reasoning_text += event.get("delta", "")
+            if event_type in ("response.completed", "response.done"):
+                final_response_obj = event.get("response", {})
+                if not full_text:
+                    full_text = _extract_final_text_from_response(final_response_obj)
+                if not reasoning_text:
+                    reasoning_text = _extract_reasoning_from_response(final_response_obj)
+                usage = _extract_usage_from_response(final_response_obj)
+                tool_calls = _extract_tool_calls_from_response(final_response_obj)
+
+        # Build Anthropic content blocks
+        content_blocks: list[dict] = []
+        if reasoning_text:
+            content_blocks.append({"type": "thinking", "thinking": reasoning_text})
+        if full_text:
+            content_blocks.append({"type": "text", "text": full_text})
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            try:
+                inp = json.loads(fn.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                inp = {}
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                "name": fn.get("name", ""),
+                "input": inp,
+            })
+
+        stop_reason = "tool_use" if tool_calls else "end_turn"
+        if not content_blocks:
+            content_blocks.append({"type": "text", "text": ""})
+
+        result = {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": content_blocks,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": _anthropic_usage(usage),
+        }
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        await save_log(
+            msg_id, "messages", model, False, body, result,
+            status="ok",
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
+        return result
+
+    async def anthropic_messages_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
+        """Streaming Anthropic Messages API via Codex Responses."""
+        t0 = time.monotonic()
+        codex_body = _anthropic_to_responses(body)
+        model = body.get("model", "gpt-5.4")
+        msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+        url = _codex_url()
+        headers = await self.token_manager.get_headers()
+
+        collected_text = ""
+        collected_reasoning = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        status = "ok"
+        block_index = 0
+        in_thinking = False
+        in_text = False
+        has_tool_calls = False
+        tool_blocks: list[dict] = []
+
+        def _sse(event_type: str, data: dict) -> bytes:
+            return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+
+        async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
+            if resp.status_code >= 400:
+                error_body = await resp.aread()
+                status = "error"
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                try:
+                    err = json.loads(error_body)
+                except Exception:
+                    err = {"error": {"message": error_body.decode(errors="replace")}}
+                await save_log(msg_id, "messages", model, True, body, err,
+                               status="error", duration_ms=duration_ms)
+                yield _sse("error", {
+                    "type": "error",
+                    "error": {"type": "api_error", "message": err.get("error", {}).get("message", str(err))},
+                })
+                return
+
+            # Emit message_start
+            yield _sse("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            })
+
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type", "")
+
+                # Reasoning/thinking delta
+                if event_type == "response.reasoning_summary_text.delta":
+                    r_delta = event.get("delta", "")
+                    collected_reasoning += r_delta
+                    if not in_thinking:
+                        in_thinking = True
+                        yield _sse("content_block_start", {
+                            "type": "content_block_start",
+                            "index": block_index,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        })
+                    yield _sse("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {"type": "thinking_delta", "thinking": r_delta},
+                    })
+
+                # Close thinking block when text starts
+                if event_type == "response.output_text.delta" and in_thinking and not in_text:
+                    yield _sse("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": block_index,
+                    })
+                    block_index += 1
+                    in_thinking = False
+
+                # Text content delta
+                text_delta = _extract_text_from_responses_event(event)
+                if text_delta is not None:
+                    collected_text += text_delta
+                    if not in_text:
+                        in_text = True
+                        yield _sse("content_block_start", {
+                            "type": "content_block_start",
+                            "index": block_index,
+                            "content_block": {"type": "text", "text": ""},
+                        })
+                    yield _sse("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {"type": "text_delta", "text": text_delta},
+                    })
+
+                # Function call tracking
+                if event_type == "response.output_item.added" and event.get("item", {}).get("type") == "function_call":
+                    has_tool_calls = True
+                    item = event["item"]
+                    tool_blocks.append({
+                        "id": item.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                        "name": item.get("name", ""),
+                        "arguments": "",
+                    })
+
+                if event_type == "response.function_call_arguments.delta":
+                    if tool_blocks:
+                        tool_blocks[-1]["arguments"] += event.get("delta", "")
+
+                if event_type == "response.function_call_arguments.done":
+                    if tool_blocks:
+                        tb = tool_blocks[-1]
+                        if in_text:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                            block_index += 1
+                            in_text = False
+                        if in_thinking:
+                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                            block_index += 1
+                            in_thinking = False
+                        yield _sse("content_block_start", {
+                            "type": "content_block_start",
+                            "index": block_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tb["id"],
+                                "name": tb["name"],
+                                "input": {},
+                            },
+                        })
+                        yield _sse("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "input_json_delta", "partial_json": tb["arguments"]},
+                        })
+                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                        block_index += 1
+
+                if event_type in ("response.completed", "response.done"):
+                    response_obj = event.get("response", {})
+                    usage = _extract_usage_from_response(response_obj)
+
+                if event_type in ("error", "response.failed"):
+                    status = "error"
+
+            # Close any open blocks
+            if in_thinking:
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                block_index += 1
+            if in_text:
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": block_index})
+                block_index += 1
+
+        # Emit message_delta + message_stop
+        stop_reason = "tool_use" if has_tool_calls else "end_turn"
+        yield _sse("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": usage.get("completion_tokens", 0)},
+        })
+        yield _sse("message_stop", {"type": "message_stop"})

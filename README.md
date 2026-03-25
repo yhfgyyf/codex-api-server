@@ -1,14 +1,15 @@
 # Codex API Server
 
-OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credentials to provide standard `/v1/chat/completions` and `/v1/responses` endpoints.
+OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credentials to provide standard `/v1/chat/completions`, `/v1/responses`, and Anthropic `/v1/messages` endpoints.
 
 ## Features
 
 - **OpenAI API compatible** — works with any OpenAI SDK, vLLM client, or tool
+- **Anthropic Messages API** — full `/v1/messages` support with `thinking` content blocks
 - **Reasoning model support** — streams `reasoning_content` (thinking process) in DeepSeek/vLLM format
 - **Function calling** — full tool/function calling support with streaming tool_calls
 - **Auto token refresh** — reads `~/.codex/auth.json`, refreshes OAuth tokens before expiry
-- **Streaming SSE** — full Server-Sent Events support for chat completions
+- **Streaming SSE** — full Server-Sent Events support for all endpoints
 - **Responses API** — proxy passthrough for OpenAI's `/v1/responses` endpoint
 - **vLLM parameter compatible** — accepts all OpenAI/vLLM params, silently ignores unsupported ones
 - **Request logging** — all API calls stored in SQLite with full request/response data
@@ -126,6 +127,143 @@ if resp.choices[0].finish_reason == "tool_calls":
     print(resp.choices[0].message.tool_calls)
 ```
 
+### With Anthropic Python SDK
+
+```python
+import anthropic
+
+# Note: base_url should NOT include /v1 (SDK adds it automatically)
+client = anthropic.Anthropic(base_url="http://localhost:18888", api_key="any")
+
+# Basic message
+resp = client.messages.create(
+    model="gpt-5.4",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp.content[0].text)
+
+# With extended thinking (reasoning)
+resp = client.messages.create(
+    model="gpt-5.4",
+    max_tokens=4096,
+    thinking={"type": "enabled", "budget_tokens": 10000},
+    messages=[{"role": "user", "content": "What is 15 * 37? Show reasoning."}],
+)
+for block in resp.content:
+    if block.type == "thinking":
+        print("Thinking:", block.thinking)
+    elif block.type == "text":
+        print("Answer:", block.text)
+
+# Streaming
+with client.messages.stream(
+    model="gpt-5.4",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Count to 5"}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+### With curl (Anthropic format)
+
+```bash
+# Anthropic Messages API
+curl http://localhost:18888/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
+
+# With thinking enabled
+curl http://localhost:18888/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"Solve: 15*37"}]}'
+
+# Streaming
+curl -N http://localhost:18888/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## Anthropic Messages API
+
+The server implements the Anthropic Messages API (`/v1/messages` and `/messages`), enabling compatibility with any Anthropic SDK or vLLM Anthropic endpoint client.
+
+### Non-streaming response
+
+```json
+{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "model": "gpt-5.4",
+  "content": [
+    {"type": "thinking", "thinking": "I need to calculate..."},
+    {"type": "text", "text": "The answer is 555."}
+  ],
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 29, "output_tokens": 70}
+}
+```
+
+### Streaming response
+
+Uses Anthropic SSE format with `event:` + `data:` lines:
+
+```
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_abc","role":"assistant",...}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I need to..."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"The answer"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":70}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+### Extended thinking
+
+Enable thinking via the `thinking` parameter. The `budget_tokens` value is mapped to Codex reasoning effort:
+
+| budget_tokens | Codex effort |
+|---------------|-------------|
+| <= 2000 | `low` |
+| <= 8000 | `medium` |
+| > 8000 | `high` |
+
+### Supported Anthropic parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `model` | Model ID |
+| `messages` | Conversation (user, assistant roles with content blocks) |
+| `system` | System prompt (string or content block array) |
+| `max_tokens` | Required by Anthropic SDK (silently ignored by Codex) |
+| `stream` | Enable streaming SSE |
+| `thinking` | Extended thinking: `{"type": "enabled", "budget_tokens": N}` |
+| `tools` | Tool definitions (Anthropic format with `input_schema`) |
+| `tool_choice` | Tool selection (`auto`, `any`, `tool`) |
+
+Other Anthropic-specific parameters (`temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata`) are silently ignored.
+
 ## Reasoning Model Support
 
 All Codex models are reasoning models. The server outputs the thinking process via the `reasoning_content` field, compatible with DeepSeek R1 / vLLM format.
@@ -206,6 +344,7 @@ This means you can point any OpenAI SDK or vLLM client at this server without mo
 | GET | `/v1/models` | List available models |
 | GET | `/v1/models/{id}` | Get model details |
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
+| POST | `/v1/messages` | Anthropic Messages API (streaming + non-streaming) |
 | POST | `/v1/responses` | OpenAI Responses API proxy |
 | GET | `/v1/logs` | Query API call logs |
 | GET | `/v1/logs/stats` | Log statistics |

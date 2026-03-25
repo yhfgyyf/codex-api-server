@@ -120,6 +120,33 @@ async def chat_completions(request: Request):
     return JSONResponse(content=result, status_code=status if isinstance(status, int) else 500)
 
 
+# -- Anthropic Messages API --
+
+async def _handle_anthropic_messages(request: Request):
+    _check_api_key(request)
+    body = await _read_body(request)
+    stream = body.get("stream", False)
+
+    if stream:
+        return StreamingResponse(
+            proxy.anthropic_messages_stream(body),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    result = await proxy.anthropic_messages(body)
+    status_code = 200 if result.get("type") != "error" else 400
+    return JSONResponse(content=result, status_code=status_code)
+
+
+app.post("/v1/messages")(_handle_anthropic_messages)
+app.post("/messages")(_handle_anthropic_messages)
+
+
 # -- Responses API --
 
 @app.post("/v1/responses")
