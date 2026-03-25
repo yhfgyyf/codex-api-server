@@ -4,10 +4,13 @@ OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credenti
 
 ## Features
 
-- **OpenAI API compatible** — works with any OpenAI SDK or tool
+- **OpenAI API compatible** — works with any OpenAI SDK, vLLM client, or tool
+- **Reasoning model support** — streams `reasoning_content` (thinking process) in DeepSeek/vLLM format
+- **Function calling** — full tool/function calling support with streaming tool_calls
 - **Auto token refresh** — reads `~/.codex/auth.json`, refreshes OAuth tokens before expiry
 - **Streaming SSE** — full Server-Sent Events support for chat completions
 - **Responses API** — proxy passthrough for OpenAI's `/v1/responses` endpoint
+- **vLLM parameter compatible** — accepts all OpenAI/vLLM params, silently ignores unsupported ones
 - **Request logging** — all API calls stored in SQLite with full request/response data
 - **JSONL export** — download or export logs for analysis and fine-tuning
 - **Async & connection pooling** — built on FastAPI + httpx for high concurrency
@@ -62,6 +65,11 @@ curl http://localhost:18888/v1/chat/completions \
 curl -N http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+
+# With reasoning effort control
+curl http://localhost:18888/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"high"}'
 ```
 
 ### With OpenAI Python SDK
@@ -74,21 +82,121 @@ client = OpenAI(base_url="http://localhost:18888/v1", api_key="any")
 # List models
 models = client.models.list()
 
-# Chat completion
+# Chat completion (with reasoning output)
 resp = client.chat.completions.create(
     model="gpt-5.4",
-    messages=[{"role": "user", "content": "Hello"}],
+    messages=[{"role": "user", "content": "What is 15 * 37? Think step by step."}],
 )
-print(resp.choices[0].message.content)
+msg = resp.choices[0].message
+print("Reasoning:", getattr(msg, "reasoning_content", None))
+print("Answer:", msg.content)
 
-# Streaming
+# Streaming (reasoning_content chunks arrive before content chunks)
 for chunk in client.chat.completions.create(
     model="gpt-5.4",
     messages=[{"role": "user", "content": "Hello"}],
     stream=True,
 ):
-    print(chunk.choices[0].delta.content or "", end="")
+    delta = chunk.choices[0].delta
+    # reasoning_content: thinking process (if present)
+    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+        print(delta.reasoning_content, end="", flush=True)
+    # content: final answer
+    if delta.content:
+        print(delta.content, end="", flush=True)
+
+# Function calling
+resp = client.chat.completions.create(
+    model="gpt-5.4",
+    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"],
+            },
+        },
+    }],
+)
+if resp.choices[0].finish_reason == "tool_calls":
+    print(resp.choices[0].message.tool_calls)
 ```
+
+## Reasoning Model Support
+
+All Codex models are reasoning models. The server outputs the thinking process via the `reasoning_content` field, compatible with DeepSeek R1 / vLLM format.
+
+### Non-streaming response
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": "The answer is 555.",
+      "reasoning_content": "I need to calculate 15 * 37. Let me break this down..."
+    },
+    "finish_reason": "stop"
+  }]
+}
+```
+
+### Streaming response
+
+Reasoning chunks arrive first (with `delta.reasoning_content`), followed by content chunks (with `delta.content`):
+
+```
+data: {"choices":[{"delta":{"role":"assistant"}}]}
+data: {"choices":[{"delta":{"reasoning_content":"I need to"}}]}
+data: {"choices":[{"delta":{"reasoning_content":" calculate..."}}]}
+data: {"choices":[{"delta":{"content":"The answer"}}]}
+data: {"choices":[{"delta":{"content":" is 555."}}]}
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+### Reasoning effort control
+
+Use `reasoning_effort` to control thinking depth:
+
+| Value | Description |
+|-------|-------------|
+| `low` | Minimal thinking, fast responses |
+| `medium` | Balanced (default) |
+| `high` | Deep reasoning |
+
+```bash
+curl http://localhost:18888/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","messages":[...],"reasoning_effort":"high"}'
+```
+
+## Parameter Compatibility
+
+The server accepts all standard OpenAI / vLLM Chat Completions parameters. Supported parameters are mapped to the Codex Responses API format; unsupported ones are silently ignored (no errors).
+
+### Supported parameters (forwarded to Codex)
+
+| Parameter | Description |
+|-----------|-------------|
+| `model` | Model ID |
+| `messages` | Conversation messages (system, user, assistant, tool) |
+| `stream` | Enable streaming SSE |
+| `tools` | Function/tool definitions |
+| `tool_choice` | Tool selection strategy (`auto`, `none`, `required`, etc.) |
+| `parallel_tool_calls` | Allow parallel function calls |
+| `reasoning_effort` | Thinking depth: `low`, `medium`, `high` |
+| `reasoning` | Advanced: `{"effort": "high", "summary": "detailed"}` |
+
+### Silently ignored parameters (no error)
+
+`temperature`, `top_p`, `top_k`, `max_tokens`, `max_completion_tokens`, `n`, `stop`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `seed`, `response_format`, `user`, `stream_options`, `service_tier`, `min_p`, `best_of`, `suffix`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, etc.
+
+This means you can point any OpenAI SDK or vLLM client at this server without modifying request parameters.
 
 ## API Endpoints
 
