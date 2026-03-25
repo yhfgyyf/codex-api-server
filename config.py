@@ -14,6 +14,8 @@ SERVER_HOST = os.environ.get("CODEX_HOST", "0.0.0.0")
 TOKEN_REFRESH_BUFFER_SECONDS = 300
 LOCAL_API_KEY = os.environ.get("CODEX_API_KEY")
 
+DB_PATH = Path(os.environ.get("CODEX_DB_PATH", "~/.codex/api_logs.db")).expanduser()
+
 CODEX_MODELS = [
     "gpt-5.4",
     "gpt-5.3-codex",

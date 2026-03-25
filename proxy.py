@@ -8,6 +8,7 @@ import httpx
 
 from auth import TokenManager
 from config import CODEX_BASE_URL, CODEX_RESPONSES_PATH
+from db import save_log
 
 logger = logging.getLogger("codex-api-server.proxy")
 
@@ -22,7 +23,6 @@ def _chat_to_responses(body: dict) -> dict:
     messages = body.get("messages", [])
     model = body.get("model", "gpt-5.4")
 
-    # Separate system messages and conversation
     system_parts = []
     input_items = []
 
@@ -30,14 +30,11 @@ def _chat_to_responses(body: dict) -> dict:
         role = msg.get("role", "")
         content = msg.get("content", "")
 
-        # Handle content that's a list of parts
         if isinstance(content, list):
             text_parts = []
             for part in content:
                 if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "input_text":
+                    if part.get("type") in ("text", "input_text"):
                         text_parts.append(part.get("text", ""))
                 elif isinstance(part, str):
                     text_parts.append(part)
@@ -68,16 +65,11 @@ def _chat_to_responses(body: dict) -> dict:
         "include": ["reasoning.encrypted_content"],
     }
 
-    # Codex requires instructions field
     result["instructions"] = "\n\n".join(system_parts) if system_parts else "You are a helpful assistant."
 
-    # Map temperature
     if "temperature" in body:
         result["temperature"] = body["temperature"]
 
-    # Note: Codex doesn't support max_output_tokens; max_tokens is ignored
-
-    # Map reasoning_effort
     if "reasoning_effort" in body:
         result["reasoning"] = {"effort": body["reasoning_effort"]}
 
@@ -85,7 +77,6 @@ def _chat_to_responses(body: dict) -> dict:
 
 
 def _extract_text_from_responses_event(event: dict) -> str | None:
-    """Extract text delta from a Codex Responses SSE event."""
     event_type = event.get("type", "")
     if event_type == "response.output_text.delta":
         return event.get("delta", "")
@@ -93,7 +84,6 @@ def _extract_text_from_responses_event(event: dict) -> str | None:
 
 
 def _extract_final_text_from_response(response_obj: dict) -> str:
-    """Extract full text from a completed response object."""
     output = response_obj.get("output", [])
     text_parts = []
     for item in output:
@@ -105,7 +95,6 @@ def _extract_final_text_from_response(response_obj: dict) -> str:
 
 
 def _extract_usage_from_response(response_obj: dict) -> dict:
-    """Extract usage from response object."""
     usage = response_obj.get("usage", {})
     return {
         "prompt_tokens": usage.get("input_tokens", 0),
@@ -126,42 +115,16 @@ class OpenAIProxy:
     async def close(self):
         await self.client.aclose()
 
-    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Make request, retry once on auth failure."""
-        headers = await self.token_manager.get_headers()
-        headers.update(kwargs.pop("extra_headers", {}))
-        resp = await self.client.request(method, url, headers=headers, **kwargs)
-        if resp.status_code in (401, 403):
-            logger.warning("Got %d, refreshing token...", resp.status_code)
-            await self.token_manager._do_refresh()
-            headers = await self.token_manager.get_headers()
-            resp = await self.client.request(method, url, headers=headers, **kwargs)
-        return resp
-
-    async def chat_completions(self, body: dict) -> dict:
-        """Non-streaming chat completion via Codex Responses API."""
-        codex_body = _chat_to_responses(body)
-        codex_body["stream"] = True  # always stream from Codex, collect full response
-
-        model = body.get("model", "gpt-5.4")
-        run_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        url = _codex_url()
-
-        headers = await self.token_manager.get_headers()
-        full_text = ""
-        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
+    async def _stream_codex(self, url: str, codex_body: dict, headers: dict):
+        """Stream from Codex, yielding (line, event_dict_or_none) tuples."""
         async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
             if resp.status_code in (401, 403):
                 await self.token_manager._do_refresh()
                 headers = await self.token_manager.get_headers()
             elif resp.status_code >= 400:
                 error_body = await resp.aread()
-                try:
-                    error_data = json.loads(error_body)
-                except Exception:
-                    error_data = {"error": {"message": error_body.decode(errors="replace"), "type": "api_error"}}
-                return error_data
+                yield "error", error_body, resp.status_code
+                return
 
             if resp.status_code < 400:
                 async for line in resp.aiter_lines():
@@ -174,41 +137,16 @@ class OpenAIProxy:
                         event = json.loads(data_str)
                     except json.JSONDecodeError:
                         continue
-
-                    delta = _extract_text_from_responses_event(event)
-                    if delta:
-                        full_text += delta
-
-                    event_type = event.get("type", "")
-                    if event_type in ("response.completed", "response.done"):
-                        response_obj = event.get("response", {})
-                        if not full_text:
-                            full_text = _extract_final_text_from_response(response_obj)
-                        usage = _extract_usage_from_response(response_obj)
-
-                return {
-                    "id": run_id,
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": full_text},
-                        "finish_reason": "stop",
-                    }],
-                    "usage": usage,
-                }
+                    yield "event", event, 0
+                return
 
         # Retry after token refresh
         headers = await self.token_manager.get_headers()
         async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
             if resp.status_code >= 400:
                 error_body = await resp.aread()
-                try:
-                    return json.loads(error_body)
-                except Exception:
-                    return {"error": {"message": error_body.decode(errors="replace"), "type": "api_error"}}
-
+                yield "error", error_body, resp.status_code
+                return
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -219,17 +157,47 @@ class OpenAIProxy:
                     event = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                delta = _extract_text_from_responses_event(event)
-                if delta:
-                    full_text += delta
-                event_type = event.get("type", "")
-                if event_type in ("response.completed", "response.done"):
-                    response_obj = event.get("response", {})
-                    if not full_text:
-                        full_text = _extract_final_text_from_response(response_obj)
-                    usage = _extract_usage_from_response(response_obj)
+                yield "event", event, 0
 
-        return {
+    async def chat_completions(self, body: dict) -> dict:
+        """Non-streaming chat completion via Codex Responses API."""
+        t0 = time.monotonic()
+        codex_body = _chat_to_responses(body)
+        codex_body["stream"] = True
+
+        model = body.get("model", "gpt-5.4")
+        run_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        url = _codex_url()
+        headers = await self.token_manager.get_headers()
+
+        full_text = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        status = "ok"
+
+        async for kind, data, code in self._stream_codex(url, codex_body, headers):
+            if kind == "error":
+                try:
+                    error_data = json.loads(data)
+                except Exception:
+                    error_data = {"error": {"message": data.decode(errors="replace"), "type": "api_error"}}
+                status = "error"
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                await save_log(run_id, "chat/completions", model, False, body, error_data,
+                               status="error", duration_ms=duration_ms)
+                return error_data
+
+            event = data
+            delta = _extract_text_from_responses_event(event)
+            if delta:
+                full_text += delta
+            event_type = event.get("type", "")
+            if event_type in ("response.completed", "response.done"):
+                response_obj = event.get("response", {})
+                if not full_text:
+                    full_text = _extract_final_text_from_response(response_obj)
+                usage = _extract_usage_from_response(response_obj)
+
+        result = {
             "id": run_id,
             "object": "chat.completion",
             "created": int(time.time()),
@@ -242,8 +210,20 @@ class OpenAIProxy:
             "usage": usage,
         }
 
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        await save_log(
+            run_id, "chat/completions", model, False, body, result,
+            status="ok",
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
+        return result
+
     async def chat_completions_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
         """Streaming chat completion via Codex Responses API, converting to OpenAI SSE format."""
+        t0 = time.monotonic()
         codex_body = _chat_to_responses(body)
         codex_body["stream"] = True
 
@@ -253,10 +233,21 @@ class OpenAIProxy:
         headers = await self.token_manager.get_headers()
 
         sent_role = False
+        collected_text = ""
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        status = "ok"
 
         async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
             if resp.status_code >= 400:
                 error_body = await resp.aread()
+                status = "error"
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                try:
+                    err = json.loads(error_body)
+                except Exception:
+                    err = {"error": {"message": error_body.decode(errors="replace")}}
+                await save_log(run_id, "chat/completions", model, True, body, err,
+                               status="error", duration_ms=duration_ms)
                 yield b"data: " + error_body + b"\n\n"
                 yield b"data: [DONE]\n\n"
                 return
@@ -274,7 +265,6 @@ class OpenAIProxy:
 
                 event_type = event.get("type", "")
 
-                # Send initial role chunk
                 if not sent_role and event_type in (
                     "response.output_text.delta",
                     "response.output_item.added",
@@ -291,9 +281,9 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                # Text deltas
                 delta = _extract_text_from_responses_event(event)
                 if delta is not None:
+                    collected_text += delta
                     chunk = {
                         "id": run_id,
                         "object": "chat.completion.chunk",
@@ -303,7 +293,6 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                # Completion
                 if event_type in ("response.completed", "response.done"):
                     response_obj = event.get("response", {})
                     usage = _extract_usage_from_response(response_obj)
@@ -317,29 +306,53 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                # Error events
                 if event_type == "error" or event_type == "response.failed":
+                    status = "error"
                     error_msg = event.get("message", event.get("response", {}).get("error", {}).get("message", "Unknown error"))
                     error_chunk = {"error": {"message": error_msg, "type": "api_error"}}
                     yield f"data: {json.dumps(error_chunk)}\n\n".encode()
 
         yield b"data: [DONE]\n\n"
 
+        # Save log after stream completes
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        response_summary = {
+            "id": run_id,
+            "object": "chat.completion",
+            "model": model,
+            "content": collected_text,
+            "usage": usage,
+        }
+        await save_log(
+            run_id, "chat/completions", model, True, body, response_summary,
+            status=status,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
+
     async def responses_proxy(self, body: dict) -> dict:
         """Direct proxy to Codex Responses API (non-streaming)."""
-        body["stream"] = True  # Codex requires streaming
-        body["store"] = False  # Codex requires store=false
+        t0 = time.monotonic()
+        body_copy = {**body, "stream": True, "store": False}
+        model = body.get("model", "gpt-5.4")
+        request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
         headers = await self.token_manager.get_headers()
 
         final_response = None
-        async with self.client.stream("POST", url, json=body, headers=headers) as resp:
+        async with self.client.stream("POST", url, json=body_copy, headers=headers) as resp:
             if resp.status_code >= 400:
                 error_body = await resp.aread()
+                duration_ms = int((time.monotonic() - t0) * 1000)
                 try:
-                    return json.loads(error_body)
+                    err = json.loads(error_body)
                 except Exception:
-                    return {"error": {"message": error_body.decode(errors="replace")}}
+                    err = {"error": {"message": error_body.decode(errors="replace")}}
+                await save_log(request_id, "responses", model, False, body, err,
+                               status="error", duration_ms=duration_ms)
+                return err
 
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
@@ -354,21 +367,82 @@ class OpenAIProxy:
                 if event.get("type") in ("response.completed", "response.done"):
                     final_response = event.get("response", event)
 
-        return final_response or {"error": {"message": "No response received"}}
+        result = final_response or {"error": {"message": "No response received"}}
+        duration_ms = int((time.monotonic() - t0) * 1000)
+
+        usage = _extract_usage_from_response(result) if final_response else {}
+        await save_log(
+            request_id, "responses", model, False, body, result,
+            status="ok" if final_response else "error",
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
+        return result
 
     async def responses_proxy_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
         """Direct proxy to Codex Responses API (streaming passthrough)."""
-        body["stream"] = True
-        body["store"] = False
+        t0 = time.monotonic()
+        body_copy = {**body, "stream": True, "store": False}
+        model = body.get("model", "gpt-5.4")
+        request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
         headers = await self.token_manager.get_headers()
 
-        async with self.client.stream("POST", url, json=body, headers=headers) as resp:
+        collected_text = ""
+        usage = {}
+        status = "ok"
+
+        async with self.client.stream("POST", url, json=body_copy, headers=headers) as resp:
             if resp.status_code >= 400:
                 error_body = await resp.aread()
+                duration_ms = int((time.monotonic() - t0) * 1000)
+                try:
+                    err = json.loads(error_body)
+                except Exception:
+                    err = {"error": {"message": error_body.decode(errors="replace")}}
+                await save_log(request_id, "responses", model, True, body, err,
+                               status="error", duration_ms=duration_ms)
                 yield b"data: " + error_body + b"\n\n"
                 yield b"data: [DONE]\n\n"
                 return
 
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    data_str = line[5:].strip()
+                    if data_str != "[DONE]":
+                        try:
+                            event = json.loads(data_str)
+                            delta = _extract_text_from_responses_event(event)
+                            if delta:
+                                collected_text += delta
+                            event_type = event.get("type", "")
+                            if event_type in ("response.completed", "response.done"):
+                                response_obj = event.get("response", {})
+                                usage = _extract_usage_from_response(response_obj)
+                                if not collected_text:
+                                    collected_text = _extract_final_text_from_response(response_obj)
+                            if event_type in ("error", "response.failed"):
+                                status = "error"
+                        except json.JSONDecodeError:
+                            pass
+                # Pass through raw SSE
+                yield (line + "\n").encode()
+            yield b"\n"
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        response_summary = {
+            "id": request_id,
+            "model": model,
+            "content": collected_text,
+            "usage": usage,
+        }
+        await save_log(
+            request_id, "responses", model, True, body, response_summary,
+            status=status,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
