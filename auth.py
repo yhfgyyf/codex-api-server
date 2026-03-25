@@ -2,21 +2,19 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import platform
 import tempfile
 import time
 from pathlib import Path
 
 import httpx
 
-from config import (
-    AUTH_JSON_PATH,
-    CLIENT_ID,
-    TOKEN_REFRESH_BUFFER_SECONDS,
-    TOKEN_URL,
-    USER_AGENT,
-)
+from config import AUTH_JSON_PATH, CLIENT_ID, TOKEN_REFRESH_BUFFER_SECONDS, TOKEN_URL
 
 logger = logging.getLogger("codex-api-server.auth")
+
+USER_AGENT = f"pi ({platform.system().lower()} {platform.release()}; {platform.machine()})"
 
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -25,7 +23,6 @@ def _decode_jwt_payload(token: str) -> dict:
     if len(parts) != 3:
         raise ValueError("Invalid JWT format")
     payload_b64 = parts[1]
-    # Add padding
     padding = 4 - len(payload_b64) % 4
     if padding != 4:
         payload_b64 += "=" * padding
@@ -44,7 +41,6 @@ class TokenManager:
         self._load_auth()
 
     def _load_auth(self):
-        """Load credentials from auth.json."""
         if not AUTH_JSON_PATH.exists():
             raise FileNotFoundError(f"Auth file not found: {AUTH_JSON_PATH}")
 
@@ -59,23 +55,20 @@ class TokenManager:
         if not self._access_token:
             raise ValueError("No access_token in auth.json")
 
-        # Decode JWT to get expiry
         try:
             payload = _decode_jwt_payload(self._access_token)
             self._expires_at = payload.get("exp", 0)
-            # Extract account_id from JWT if not in tokens
             if not self._account_id:
                 auth_claim = payload.get("https://api.openai.com/auth", {})
                 self._account_id = auth_claim.get("chatgpt_account_id", "")
         except Exception as e:
             logger.warning(f"Failed to decode JWT: {e}")
-            self._expires_at = time.time() + 3600  # assume 1h validity
+            self._expires_at = time.time() + 3600
 
     def _is_expired(self) -> bool:
         return time.time() >= (self._expires_at - TOKEN_REFRESH_BUFFER_SECONDS)
 
     def _save_auth(self):
-        """Atomically write updated tokens back to auth.json."""
         self._auth_data["tokens"]["access_token"] = self._access_token
         self._auth_data["tokens"]["refresh_token"] = self._refresh_token
         self._auth_data["tokens"]["account_id"] = self._account_id
@@ -96,7 +89,6 @@ class TokenManager:
             raise
 
     async def _do_refresh(self):
-        """Refresh the access token using the refresh token."""
         logger.info("Refreshing Codex OAuth token...")
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -119,7 +111,6 @@ class TokenManager:
         if "refresh_token" in data:
             self._refresh_token = data["refresh_token"]
 
-        # Update expiry from new JWT
         try:
             payload = _decode_jwt_payload(self._access_token)
             self._expires_at = payload.get("exp", 0)
@@ -131,17 +122,14 @@ class TokenManager:
             self._expires_at = time.time() + expires_in
 
         self._save_auth()
-        logger.info("Token refreshed successfully, expires at %s", time.ctime(self._expires_at))
+        logger.info("Token refreshed, expires at %s", time.ctime(self._expires_at))
 
     async def refresh_if_needed(self):
-        """Refresh token if expired, with lock to prevent concurrent refreshes."""
         if not self._is_expired():
             return
         async with self._lock:
-            # Double-check after acquiring lock
             if not self._is_expired():
                 return
-            # Re-read auth.json in case another process refreshed it
             try:
                 self._load_auth()
                 if not self._is_expired():
@@ -151,14 +139,17 @@ class TokenManager:
             await self._do_refresh()
 
     async def get_headers(self) -> dict[str, str]:
-        """Get authentication headers for upstream requests."""
+        """Get authentication headers for Codex API requests."""
         await self.refresh_if_needed()
         headers = {
             "Authorization": f"Bearer {self._access_token}",
+            "chatgpt-account-id": self._account_id,
+            "OpenAI-Beta": "responses=experimental",
+            "originator": "pi",
             "User-Agent": USER_AGENT,
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
         }
-        if self._account_id:
-            headers["ChatGPT-Account-Id"] = self._account_id
         return headers
 
     @property

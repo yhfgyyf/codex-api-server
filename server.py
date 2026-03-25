@@ -1,5 +1,6 @@
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -17,22 +18,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("codex-api-server")
 
-app = FastAPI(title="Codex API Server", version="1.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 token_manager: TokenManager | None = None
 proxy: OpenAIProxy | None = None
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global token_manager, proxy
     token_manager = TokenManager()
     proxy = OpenAIProxy(token_manager)
@@ -42,23 +33,27 @@ async def startup():
         time.ctime(token_manager.expires_at),
         token_manager.account_id,
     )
-
-
-@app.on_event("shutdown")
-async def shutdown():
+    yield
     if proxy:
         await proxy.close()
 
 
+app = FastAPI(title="Codex API Server", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 def _check_api_key(request: Request):
-    """Optional API key validation."""
     if not LOCAL_API_KEY:
         return
     auth_header = request.headers.get("authorization", "")
-    if auth_header.startswith("Bearer "):
-        key = auth_header[7:]
-    else:
-        key = auth_header
+    key = auth_header[7:] if auth_header.startswith("Bearer ") else auth_header
     if key != LOCAL_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -97,7 +92,7 @@ async def chat_completions(request: Request):
 
     if stream:
         return StreamingResponse(
-            proxy.proxy_stream("/v1/chat/completions", body),
+            proxy.chat_completions_stream(body),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -106,8 +101,9 @@ async def chat_completions(request: Request):
             },
         )
 
-    resp = await proxy.proxy_request("POST", "/v1/chat/completions", body)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    result = await proxy.chat_completions(body)
+    status = 200 if "error" not in result else (result.get("error", {}).get("status", 500))
+    return JSONResponse(content=result, status_code=status if isinstance(status, int) else 500)
 
 
 @app.post("/v1/responses")
@@ -118,7 +114,7 @@ async def responses(request: Request):
 
     if stream:
         return StreamingResponse(
-            proxy.proxy_stream("/v1/responses", body),
+            proxy.responses_proxy_stream(body),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -127,8 +123,8 @@ async def responses(request: Request):
             },
         )
 
-    resp = await proxy.proxy_request("POST", "/v1/responses", body)
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    result = await proxy.responses_proxy(body)
+    return JSONResponse(content=result)
 
 
 if __name__ == "__main__":

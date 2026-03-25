@@ -53,14 +53,14 @@ fi
 
 # 5. Non-streaming chat completion
 test_endpoint "Chat Completion (non-streaming)" \
-    "curl -sf $BASE/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"gpt-5.4\",\"messages\":[{\"role\":\"user\",\"content\":\"Say just the word hello\"}],\"max_tokens\":20}'"
+    "curl -sf --max-time 60 $BASE/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"gpt-5.4\",\"messages\":[{\"role\":\"user\",\"content\":\"Say just the word hello\"}]}'"
 
 # 6. Streaming chat completion
 echo ""
 echo "=== Test: Chat Completion (streaming) ==="
 response=$(curl -sN --max-time 30 $BASE/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Say just the word hi"}],"stream":true,"max_tokens":20}' 2>&1)
+    -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Say just the word hi"}],"stream":true}' 2>&1)
 if echo "$response" | grep -q "data:"; then
     echo "$response" | head -5
     green "PASS (received SSE data)"
@@ -70,6 +70,26 @@ else
     red "FAIL (no SSE data received)"
     FAIL=$((FAIL + 1))
 fi
+
+# 7. Responses API (streaming)
+echo ""
+echo "=== Test: Responses API (streaming) ==="
+response=$(curl -sN --max-time 30 $BASE/v1/responses \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gpt-5.4","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say hey"}]}],"stream":true}' 2>&1)
+if echo "$response" | grep -q "response.output_text.delta"; then
+    echo "$response" | grep "output_text.delta" | head -3
+    green "PASS (received Responses API events)"
+    PASS=$((PASS + 1))
+else
+    echo "$response" | head -5
+    red "FAIL (no Responses events received)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 8. Chat with system message
+test_endpoint "Chat with System Message" \
+    "curl -sf --max-time 60 $BASE/v1/chat/completions -H 'Content-Type: application/json' -d '{\"model\":\"gpt-5.4\",\"messages\":[{\"role\":\"system\",\"content\":\"Always respond in French\"},{\"role\":\"user\",\"content\":\"Say hello\"}]}'"
 
 echo ""
 echo "============================"
