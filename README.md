@@ -1,5 +1,7 @@
 # Codex API Server
 
+[中文文档](README_CN.md)
+
 OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credentials to provide standard `/v1/chat/completions`, `/v1/responses`, and Anthropic `/v1/messages` endpoints.
 
 ## Features
