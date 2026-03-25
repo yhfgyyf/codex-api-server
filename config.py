@@ -8,13 +8,18 @@ CODEX_BASE_URL = os.environ.get("CODEX_BASE_URL", "https://chatgpt.com/backend-a
 CODEX_RESPONSES_PATH = "/codex/responses"
 
 TOKEN_URL = "https://auth.openai.com/oauth/token"
-CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CLIENT_ID = os.environ.get("CODEX_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann")
 SERVER_PORT = int(os.environ.get("CODEX_PORT", "18888"))
-SERVER_HOST = os.environ.get("CODEX_HOST", "0.0.0.0")
+# Default to loopback only — set CODEX_HOST=0.0.0.0 to expose externally
+SERVER_HOST = os.environ.get("CODEX_HOST", "127.0.0.1")
 TOKEN_REFRESH_BUFFER_SECONDS = 300
 LOCAL_API_KEY = os.environ.get("CODEX_API_KEY")
 
 DB_PATH = Path(os.environ.get("CODEX_DB_PATH", "~/.codex/api_logs.db")).expanduser()
+EXPORT_DIR = Path(os.environ.get("CODEX_EXPORT_DIR", "~/.codex/exports")).expanduser()
+
+# Max request body size (10 MB)
+MAX_BODY_BYTES = int(os.environ.get("CODEX_MAX_BODY_BYTES", str(10 * 1024 * 1024)))
 
 CODEX_MODELS = [
     "gpt-5.4",

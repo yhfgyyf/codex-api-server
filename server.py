@@ -1,7 +1,6 @@
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -9,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from auth import TokenManager
-from config import CODEX_MODELS, LOCAL_API_KEY, SERVER_HOST, SERVER_PORT
+from config import CODEX_MODELS, EXPORT_DIR, LOCAL_API_KEY, MAX_BODY_BYTES, SERVER_HOST, SERVER_PORT
 from db import close_db, count_logs, export_jsonl_file, export_jsonl_iter, init_db, query_logs
 from models import get_model_info, get_model_list
 from proxy import OpenAIProxy
@@ -30,12 +29,9 @@ async def lifespan(app: FastAPI):
     init_db()
     token_manager = TokenManager()
     proxy = OpenAIProxy(token_manager)
-    logger.info(
-        "Server started. Token valid: %s, expires: %s, account: %s",
-        token_manager.is_valid,
-        time.ctime(token_manager.expires_at),
-        token_manager.account_id,
-    )
+    if not LOCAL_API_KEY:
+        logger.warning("No CODEX_API_KEY set — server accepts unauthenticated requests.")
+    logger.info("Server started on %s:%d. Token valid: %s", SERVER_HOST, SERVER_PORT, token_manager.is_valid)
     yield
     if proxy:
         await proxy.close()
@@ -47,7 +43,6 @@ app = FastAPI(title="Codex API Server", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -62,20 +57,29 @@ def _check_api_key(request: Request):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-# ── Health ───────────────────────────────────────────────────────────────
+async def _read_body(request: Request) -> dict:
+    """Read and parse JSON body with size limit."""
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail=f"Request body too large (limit {MAX_BODY_BYTES} bytes)")
+    try:
+        return __import__("json").loads(body_bytes)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+
+# -- Health --
 
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "token_valid": token_manager.is_valid if token_manager else False,
-        "token_expires": time.ctime(token_manager.expires_at) if token_manager else None,
-        "account_id": token_manager.account_id if token_manager else None,
         "models": CODEX_MODELS,
     }
 
 
-# ── Models ───────────────────────────────────────────────────────────────
+# -- Models --
 
 @app.get("/v1/models")
 async def list_models(request: Request):
@@ -92,12 +96,12 @@ async def get_model(model_id: str, request: Request):
     return info.model_dump()
 
 
-# ── Chat Completions ─────────────────────────────────────────────────────
+# -- Chat Completions --
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     _check_api_key(request)
-    body = await request.json()
+    body = await _read_body(request)
     stream = body.get("stream", False)
 
     if stream:
@@ -116,12 +120,12 @@ async def chat_completions(request: Request):
     return JSONResponse(content=result, status_code=status if isinstance(status, int) else 500)
 
 
-# ── Responses API ────────────────────────────────────────────────────────
+# -- Responses API --
 
 @app.post("/v1/responses")
 async def responses(request: Request):
     _check_api_key(request)
-    body = await request.json()
+    body = await _read_body(request)
     stream = body.get("stream", False)
 
     if stream:
@@ -139,7 +143,7 @@ async def responses(request: Request):
     return JSONResponse(content=result)
 
 
-# ── Logs Query ───────────────────────────────────────────────────────────
+# -- Logs --
 
 @app.get("/v1/logs")
 async def get_logs(
@@ -150,8 +154,8 @@ async def get_logs(
     offset: int = Query(0, ge=0),
 ):
     _check_api_key(request)
-    logs = query_logs(endpoint=endpoint, model=model, limit=limit, offset=offset)
-    total = count_logs(endpoint=endpoint, model=model)
+    logs = await query_logs(endpoint=endpoint, model=model, limit=limit, offset=offset)
+    total = await count_logs(endpoint=endpoint, model=model)
     return {
         "object": "list",
         "total": total,
@@ -164,9 +168,9 @@ async def get_logs(
 @app.get("/v1/logs/stats")
 async def get_logs_stats(request: Request):
     _check_api_key(request)
-    total = count_logs()
-    chat_count = count_logs(endpoint="chat/completions")
-    responses_count = count_logs(endpoint="responses")
+    total = await count_logs()
+    chat_count = await count_logs(endpoint="chat/completions")
+    responses_count = await count_logs(endpoint="responses")
     return {
         "total": total,
         "chat_completions": chat_count,
@@ -174,7 +178,7 @@ async def get_logs_stats(request: Request):
     }
 
 
-# ── Export JSONL ─────────────────────────────────────────────────────────
+# -- Export --
 
 @app.get("/v1/logs/export")
 async def export_logs_jsonl(
@@ -182,9 +186,9 @@ async def export_logs_jsonl(
     endpoint: str | None = Query(None),
     model: str | None = Query(None),
 ):
-    """Stream export as JSONL download."""
+    """Download logs as JSONL."""
     _check_api_key(request)
-    lines = export_jsonl_iter(endpoint=endpoint, model=model)
+    lines = await export_jsonl_iter(endpoint=endpoint, model=model)
     content = "\n".join(lines) + "\n" if lines else ""
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -199,22 +203,30 @@ async def export_logs_jsonl(
 
 @app.post("/v1/logs/export/file")
 async def export_logs_to_file(request: Request):
-    """Export logs to a local JSONL file. Body: {"path": "/path/to/file.jsonl", "endpoint": null, "model": null}"""
+    """Export logs to a JSONL file within the allowed export directory."""
     _check_api_key(request)
-    body = await request.json()
-    filepath = body.get("path")
-    if not filepath:
-        raise HTTPException(status_code=400, detail="Missing 'path' field")
+    body = await _read_body(request)
+    filename = body.get("filename")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing 'filename' field")
 
-    filepath = Path(filepath).expanduser()
+    # Only accept a plain filename, not a path
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename — must be a plain name, not a path")
+
+    filepath = str(EXPORT_DIR / filename)
     endpoint = body.get("endpoint")
     model = body.get("model")
 
-    count = export_jsonl_file(filepath, endpoint=endpoint, model=model)
-    return {"status": "ok", "path": str(filepath), "records": count}
+    try:
+        count, resolved = await export_jsonl_file(filepath, endpoint=endpoint, model=model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"status": "ok", "path": str(resolved), "records": count}
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+# -- Main --
 
 if __name__ == "__main__":
     uvicorn.run(

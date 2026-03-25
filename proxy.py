@@ -103,6 +103,29 @@ def _extract_usage_from_response(response_obj: dict) -> dict:
     }
 
 
+async def _stream_and_collect(client: httpx.AsyncClient, url: str, body: dict, headers: dict):
+    """Stream from Codex, yield parsed events. Retry once on 401/403."""
+    async with client.stream("POST", url, json=body, headers=headers) as resp:
+        if resp.status_code not in (401, 403):
+            if resp.status_code >= 400:
+                error_body = await resp.aread()
+                yield "error", error_body
+                return
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    yield "event", json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+            return
+    # 401/403 path: caller should refresh and call again
+    yield "auth_failed", None
+
+
 class OpenAIProxy:
     def __init__(self, token_manager: TokenManager):
         self.token_manager = token_manager
@@ -115,49 +138,26 @@ class OpenAIProxy:
     async def close(self):
         await self.client.aclose()
 
-    async def _stream_codex(self, url: str, codex_body: dict, headers: dict):
-        """Stream from Codex, yielding (line, event_dict_or_none) tuples."""
-        async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
-            if resp.status_code in (401, 403):
-                await self.token_manager._do_refresh()
-                headers = await self.token_manager.get_headers()
-            elif resp.status_code >= 400:
-                error_body = await resp.aread()
-                yield "error", error_body, resp.status_code
-                return
-
-            if resp.status_code < 400:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data_str = line[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    yield "event", event, 0
-                return
-
-        # Retry after token refresh
+    async def _stream_with_retry(self, url: str, body: dict):
+        """Stream from Codex with one retry on auth failure."""
         headers = await self.token_manager.get_headers()
-        async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
-            if resp.status_code >= 400:
-                error_body = await resp.aread()
-                yield "error", error_body, resp.status_code
+        auth_failed = False
+        async for kind, data in _stream_and_collect(self.client, url, body, headers):
+            if kind == "auth_failed":
+                auth_failed = True
+                break
+            yield kind, data
+        if not auth_failed:
+            return
+
+        # Retry after refresh
+        await self.token_manager.force_refresh()
+        headers = await self.token_manager.get_headers()
+        async for kind, data in _stream_and_collect(self.client, url, body, headers):
+            if kind == "auth_failed":
+                yield "error", b'{"error":{"message":"Authentication failed after retry","type":"auth_error"}}'
                 return
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                yield "event", event, 0
+            yield kind, data
 
     async def chat_completions(self, body: dict) -> dict:
         """Non-streaming chat completion via Codex Responses API."""
@@ -168,19 +168,16 @@ class OpenAIProxy:
         model = body.get("model", "gpt-5.4")
         run_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
-        headers = await self.token_manager.get_headers()
 
         full_text = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        status = "ok"
 
-        async for kind, data, code in self._stream_codex(url, codex_body, headers):
+        async for kind, data in self._stream_with_retry(url, codex_body):
             if kind == "error":
                 try:
                     error_data = json.loads(data)
                 except Exception:
                     error_data = {"error": {"message": data.decode(errors="replace"), "type": "api_error"}}
-                status = "error"
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 await save_log(run_id, "chat/completions", model, False, body, error_data,
                                status="error", duration_ms=duration_ms)
@@ -306,7 +303,7 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                if event_type == "error" or event_type == "response.failed":
+                if event_type in ("error", "response.failed"):
                     status = "error"
                     error_msg = event.get("message", event.get("response", {}).get("error", {}).get("message", "Unknown error"))
                     error_chunk = {"error": {"message": error_msg, "type": "api_error"}}
@@ -314,7 +311,6 @@ class OpenAIProxy:
 
         yield b"data: [DONE]\n\n"
 
-        # Save log after stream completes
         duration_ms = int((time.monotonic() - t0) * 1000)
         response_summary = {
             "id": run_id,
@@ -339,33 +335,22 @@ class OpenAIProxy:
         model = body.get("model", "gpt-5.4")
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
-        headers = await self.token_manager.get_headers()
 
         final_response = None
-        async with self.client.stream("POST", url, json=body_copy, headers=headers) as resp:
-            if resp.status_code >= 400:
-                error_body = await resp.aread()
+        async for kind, data in self._stream_with_retry(url, body_copy):
+            if kind == "error":
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 try:
-                    err = json.loads(error_body)
+                    err = json.loads(data)
                 except Exception:
-                    err = {"error": {"message": error_body.decode(errors="replace")}}
+                    err = {"error": {"message": data.decode(errors="replace")}}
                 await save_log(request_id, "responses", model, False, body, err,
                                status="error", duration_ms=duration_ms)
                 return err
 
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") in ("response.completed", "response.done"):
-                    final_response = event.get("response", event)
+            event = data
+            if event.get("type") in ("response.completed", "response.done"):
+                final_response = event.get("response", event)
 
         result = final_response or {"error": {"message": "No response received"}}
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -427,7 +412,6 @@ class OpenAIProxy:
                                 status = "error"
                         except json.JSONDecodeError:
                             pass
-                # Pass through raw SSE
                 yield (line + "\n").encode()
             yield b"\n"
 

@@ -2,8 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
-import platform
 import tempfile
 import time
 from pathlib import Path
@@ -14,7 +12,7 @@ from config import AUTH_JSON_PATH, CLIENT_ID, TOKEN_REFRESH_BUFFER_SECONDS, TOKE
 
 logger = logging.getLogger("codex-api-server.auth")
 
-USER_AGENT = f"pi ({platform.system().lower()} {platform.release()}; {platform.machine()})"
+USER_AGENT = "codex-api-server"
 
 
 def _decode_jwt_payload(token: str) -> dict:
@@ -62,7 +60,7 @@ class TokenManager:
                 auth_claim = payload.get("https://api.openai.com/auth", {})
                 self._account_id = auth_claim.get("chatgpt_account_id", "")
         except Exception as e:
-            logger.warning(f"Failed to decode JWT: {e}")
+            logger.warning("Failed to decode JWT: %s", e)
             self._expires_at = time.time() + 3600
 
     def _is_expired(self) -> bool:
@@ -89,6 +87,7 @@ class TokenManager:
             raise
 
     async def _do_refresh(self):
+        """Refresh the access token. Must be called under self._lock."""
         logger.info("Refreshing Codex OAuth token...")
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -122,7 +121,7 @@ class TokenManager:
             self._expires_at = time.time() + expires_in
 
         self._save_auth()
-        logger.info("Token refreshed, expires at %s", time.ctime(self._expires_at))
+        logger.info("Token refreshed successfully.")
 
     async def refresh_if_needed(self):
         if not self._is_expired():
@@ -134,8 +133,13 @@ class TokenManager:
                 self._load_auth()
                 if not self._is_expired():
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to reload auth.json before refresh: %s", e)
+            await self._do_refresh()
+
+    async def force_refresh(self):
+        """Force a token refresh under lock."""
+        async with self._lock:
             await self._do_refresh()
 
     async def get_headers(self) -> dict[str, str]:
