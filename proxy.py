@@ -18,8 +18,64 @@ def _codex_url() -> str:
     return f"{base}{CODEX_RESPONSES_PATH}"
 
 
+def _convert_tools_for_codex(tools: list) -> list:
+    """Convert OpenAI Chat Completions tools format to Codex Responses format."""
+    codex_tools = []
+    for tool in tools:
+        if tool.get("type") == "function":
+            fn = tool.get("function", {})
+            codex_tools.append({
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+                "strict": None,
+            })
+        else:
+            codex_tools.append(tool)
+    return codex_tools
+
+
+def _convert_tool_calls_message(msg: dict) -> dict:
+    """Convert assistant message with tool_calls to Codex format."""
+    items = []
+    content = msg.get("content")
+    if content:
+        items.append({"type": "output_text", "text": content})
+    for tc in msg.get("tool_calls", []):
+        fn = tc.get("function", {})
+        items.append({
+            "type": "function_call",
+            "id": tc.get("id", ""),
+            "name": fn.get("name", ""),
+            "arguments": fn.get("arguments", "{}"),
+        })
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": items,
+    }
+
+
+def _clamp_reasoning_effort(effort: str, model: str) -> str:
+    """Clamp reasoning effort to valid range per model."""
+    m = model.lower()
+    if "5.2" in m or "5.3" in m or "5.4" in m:
+        if effort == "minimal":
+            return "low"
+    if "5.1" in m and "mini" not in m:
+        if effort == "xhigh":
+            return "high"
+    return effort
+
+
 def _chat_to_responses(body: dict) -> dict:
-    """Convert OpenAI Chat Completions request to Codex Responses format."""
+    """Convert OpenAI Chat Completions request to Codex Responses format.
+
+    Accepts all standard OpenAI/vLLM Chat Completions parameters.
+    Supported params are mapped to Codex Responses format.
+    Unsupported params (temperature, top_p, max_tokens, etc.) are silently ignored.
+    """
     messages = body.get("messages", [])
     model = body.get("model", "gpt-5.4")
 
@@ -29,6 +85,20 @@ def _chat_to_responses(body: dict) -> dict:
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
+
+        # Handle tool_calls in assistant messages
+        if role == "assistant" and msg.get("tool_calls"):
+            input_items.append(_convert_tool_calls_message(msg))
+            continue
+
+        # Handle tool/function result messages
+        if role == "tool":
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id", ""),
+                "output": content if isinstance(content, str) else json.dumps(content),
+            })
+            continue
 
         if isinstance(content, list):
             text_parts = []
@@ -60,20 +130,66 @@ def _chat_to_responses(body: dict) -> dict:
         "store": False,
         "stream": body.get("stream", False),
         "input": input_items,
-        "tool_choice": "auto",
-        "parallel_tool_calls": True,
         "include": ["reasoning.encrypted_content"],
     }
 
     result["instructions"] = "\n\n".join(system_parts) if system_parts else "You are a helpful assistant."
 
-    if "temperature" in body:
-        result["temperature"] = body["temperature"]
+    # -- Tools / function calling --
+    tools = body.get("tools")
+    if tools:
+        result["tools"] = _convert_tools_for_codex(tools)
+        result["tool_choice"] = body.get("tool_choice", "auto")
+        result["parallel_tool_calls"] = body.get("parallel_tool_calls", True)
+    else:
+        result["tool_choice"] = "auto"
+        result["parallel_tool_calls"] = True
 
-    if "reasoning_effort" in body:
-        result["reasoning"] = {"effort": body["reasoning_effort"]}
+    # -- Reasoning effort (OpenAI / vLLM param) --
+    reasoning_effort = body.get("reasoning_effort")
+    reasoning = body.get("reasoning")
+    if reasoning_effort:
+        effort = _clamp_reasoning_effort(str(reasoning_effort), model)
+        result["reasoning"] = {"effort": effort, "summary": "auto"}
+    elif isinstance(reasoning, dict):
+        effort = reasoning.get("effort", "medium")
+        effort = _clamp_reasoning_effort(str(effort), model)
+        summary = reasoning.get("summary", "auto")
+        result["reasoning"] = {"effort": effort, "summary": summary}
+
+    # -- All other OpenAI/vLLM params are silently ignored --
+    # Ignored: temperature, top_p, top_k, n, max_tokens, max_completion_tokens,
+    #   stop, presence_penalty, frequency_penalty, repetition_penalty,
+    #   logit_bias, logprobs, top_logprobs, seed, response_format, user,
+    #   stream_options, service_tier, min_p, best_of, echo, suffix,
+    #   guided_json, guided_regex, guided_choice, guided_grammar,
+    #   length_penalty, early_stopping, etc.
+
+    ignored = [k for k in body if k not in {
+        "model", "messages", "stream", "tools", "tool_choice", "parallel_tool_calls",
+        "reasoning_effort", "reasoning", "instructions",
+    }]
+    if ignored:
+        logger.debug("Ignored unsupported Chat Completions params: %s", ", ".join(ignored))
 
     return result
+
+
+# Parameters that the Codex Responses API actually accepts
+_CODEX_RESPONSES_ALLOWED_KEYS = {
+    "model", "store", "stream", "instructions", "input", "include",
+    "tool_choice", "parallel_tool_calls", "tools", "reasoning", "text",
+    "prompt_cache_key",
+}
+
+
+def _sanitize_responses_body(body: dict) -> dict:
+    """Remove unsupported parameters from a Responses API body."""
+    sanitized = {k: v for k, v in body.items() if k in _CODEX_RESPONSES_ALLOWED_KEYS}
+    removed = [k for k in body if k not in _CODEX_RESPONSES_ALLOWED_KEYS]
+    if removed:
+        logger.debug("Removed unsupported Responses params: %s", ", ".join(removed))
+    return sanitized
 
 
 def _extract_text_from_responses_event(event: dict) -> str | None:
@@ -81,6 +197,26 @@ def _extract_text_from_responses_event(event: dict) -> str | None:
     if event_type == "response.output_text.delta":
         return event.get("delta", "")
     return None
+
+
+def _extract_tool_calls_from_response(response_obj: dict) -> list:
+    """Extract function calls from Codex response, convert to OpenAI tool_calls format."""
+    output = response_obj.get("output", [])
+    tool_calls = []
+    idx = 0
+    for item in output:
+        if item.get("type") == "function_call":
+            tool_calls.append({
+                "index": idx,
+                "id": item.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", "{}"),
+                },
+            })
+            idx += 1
+    return tool_calls
 
 
 def _extract_final_text_from_response(response_obj: dict) -> str:
@@ -171,6 +307,7 @@ class OpenAIProxy:
 
         full_text = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        final_response_obj = None
 
         async for kind, data in self._stream_with_retry(url, codex_body):
             if kind == "error":
@@ -189,10 +326,21 @@ class OpenAIProxy:
                 full_text += delta
             event_type = event.get("type", "")
             if event_type in ("response.completed", "response.done"):
-                response_obj = event.get("response", {})
+                final_response_obj = event.get("response", {})
                 if not full_text:
-                    full_text = _extract_final_text_from_response(response_obj)
-                usage = _extract_usage_from_response(response_obj)
+                    full_text = _extract_final_text_from_response(final_response_obj)
+                usage = _extract_usage_from_response(final_response_obj)
+
+        # Build response message
+        message: dict = {"role": "assistant", "content": full_text or None}
+        finish_reason = "stop"
+        if final_response_obj:
+            tool_calls = _extract_tool_calls_from_response(final_response_obj)
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+                finish_reason = "tool_calls"
+                if not full_text:
+                    message["content"] = None
 
         result = {
             "id": run_id,
@@ -201,8 +349,8 @@ class OpenAIProxy:
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": full_text},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason,
             }],
             "usage": usage,
         }
@@ -233,6 +381,8 @@ class OpenAIProxy:
         collected_text = ""
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         status = "ok"
+        has_tool_calls = False
+        tool_call_index = 0
 
         async with self.client.stream("POST", url, json=codex_body, headers=headers) as resp:
             if resp.status_code >= 400:
@@ -267,6 +417,7 @@ class OpenAIProxy:
                     "response.output_item.added",
                     "response.created",
                     "response.in_progress",
+                    "response.function_call_arguments.delta",
                 ):
                     sent_role = True
                     chunk = {
@@ -278,6 +429,7 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
+                # Text content delta
                 delta = _extract_text_from_responses_event(event)
                 if delta is not None:
                     collected_text += delta
@@ -290,15 +442,53 @@ class OpenAIProxy:
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
 
-                if event_type in ("response.completed", "response.done"):
-                    response_obj = event.get("response", {})
-                    usage = _extract_usage_from_response(response_obj)
+                # Function call streaming — emit tool_calls chunks
+                if event_type == "response.output_item.added" and event.get("item", {}).get("type") == "function_call":
+                    has_tool_calls = True
+                    item = event["item"]
+                    tc = {
+                        "index": tool_call_index,
+                        "id": item.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                        "type": "function",
+                        "function": {"name": item.get("name", ""), "arguments": ""},
+                    }
                     chunk = {
                         "id": run_id,
                         "object": "chat.completion.chunk",
                         "created": int(time.time()),
                         "model": model,
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n".encode()
+
+                if event_type == "response.function_call_arguments.delta":
+                    args_delta = event.get("delta", "")
+                    tc = {
+                        "index": tool_call_index,
+                        "function": {"arguments": args_delta},
+                    }
+                    chunk = {
+                        "id": run_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n".encode()
+
+                if event_type == "response.function_call_arguments.done":
+                    tool_call_index += 1
+
+                if event_type in ("response.completed", "response.done"):
+                    response_obj = event.get("response", {})
+                    usage = _extract_usage_from_response(response_obj)
+                    finish = "tool_calls" if has_tool_calls else "stop"
+                    chunk = {
+                        "id": run_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
                         "usage": usage,
                     }
                     yield f"data: {json.dumps(chunk)}\n\n".encode()
@@ -331,7 +521,7 @@ class OpenAIProxy:
     async def responses_proxy(self, body: dict) -> dict:
         """Direct proxy to Codex Responses API (non-streaming)."""
         t0 = time.monotonic()
-        body_copy = {**body, "stream": True, "store": False}
+        body_copy = _sanitize_responses_body({**body, "stream": True, "store": False})
         model = body.get("model", "gpt-5.4")
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
@@ -369,7 +559,7 @@ class OpenAIProxy:
     async def responses_proxy_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
         """Direct proxy to Codex Responses API (streaming passthrough)."""
         t0 = time.monotonic()
-        body_copy = {**body, "stream": True, "store": False}
+        body_copy = _sanitize_responses_body({**body, "stream": True, "store": False})
         model = body.get("model", "gpt-5.4")
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
