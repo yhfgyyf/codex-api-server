@@ -388,7 +388,23 @@ sqlite3 -header -column ~/.codex/api_logs.db \
 | `CODEX_CLIENT_ID` | *（内置）* | OAuth Client ID |
 | `CODEX_DB_PATH` | `~/.codex/api_logs.db` | SQLite 数据库路径 |
 | `CODEX_EXPORT_DIR` | `~/.codex/exports` | 文件导出目录 |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.4` | 未识别模型名的默认回退模型 |
+| `CODEX_MODEL_ALIASES` | *（无）* | 模型名映射（如 `claude-sonnet-4=gpt-5.4`） |
 | `CODEX_MAX_BODY_BYTES` | `10485760` | 最大请求体大小（10 MB） |
+
+### 模型名映射
+
+当使用非 Codex 模型名时（例如 Claude Code 发送 `claude-sonnet-4-20250514`），服务器自动映射到默认 Codex 模型（`gpt-5.4`）。
+
+可通过环境变量自定义映射：
+
+```bash
+# 修改默认回退模型
+export CODEX_DEFAULT_MODEL=gpt-5.3-codex
+
+# 添加显式模型别名（逗号分隔 key=value）
+export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.4,claude-haiku=gpt-5.3-codex-spark"
+```
 
 ### 安全建议
 

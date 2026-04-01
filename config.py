@@ -28,3 +28,16 @@ CODEX_MODELS = [
     "gpt-5.2-codex",
     "gpt-5.1-codex",
 ]
+
+# Default model used when incoming model name is not a Codex model
+DEFAULT_CODEX_MODEL = os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5.4")
+
+# Map non-Codex model names to Codex equivalents
+# Supports Claude, GPT, and other model families
+MODEL_ALIASES: dict[str, str] = {}
+_alias_env = os.environ.get("CODEX_MODEL_ALIASES", "")
+if _alias_env:
+    for pair in _alias_env.split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            MODEL_ALIASES[k.strip()] = v.strip()

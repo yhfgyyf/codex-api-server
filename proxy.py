@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 import httpx
 
 from auth import TokenManager
-from config import CODEX_BASE_URL, CODEX_RESPONSES_PATH
+from config import CODEX_BASE_URL, CODEX_MODELS, CODEX_RESPONSES_PATH, DEFAULT_CODEX_MODEL, MODEL_ALIASES
 from db import save_log
 
 logger = logging.getLogger("codex-api-server.proxy")
@@ -16,6 +16,23 @@ logger = logging.getLogger("codex-api-server.proxy")
 def _codex_url() -> str:
     base = CODEX_BASE_URL.rstrip("/")
     return f"{base}{CODEX_RESPONSES_PATH}"
+
+
+def _resolve_model(model: str) -> str:
+    """Map any model name to a valid Codex model.
+
+    Priority: exact Codex model > explicit alias > prefix match > default.
+    """
+    if model in CODEX_MODELS:
+        return model
+    if model in MODEL_ALIASES:
+        return MODEL_ALIASES[model]
+    # Prefix match for versioned names (e.g. claude-sonnet-4-20250514 → claude-sonnet-4)
+    for alias, target in MODEL_ALIASES.items():
+        if model.startswith(alias):
+            return target
+    logger.info("Model '%s' not recognized, using default '%s'", model, DEFAULT_CODEX_MODEL)
+    return DEFAULT_CODEX_MODEL
 
 
 def _convert_tools_for_codex(tools: list) -> list:
@@ -77,7 +94,7 @@ def _chat_to_responses(body: dict) -> dict:
     Unsupported params (temperature, top_p, max_tokens, etc.) are silently ignored.
     """
     messages = body.get("messages", [])
-    model = body.get("model", "gpt-5.4")
+    model = _resolve_model(body.get("model", "gpt-5.4"))
 
     system_parts = []
     input_items = []
@@ -198,7 +215,7 @@ def _anthropic_convert_tools(tools: list) -> list:
 
 def _anthropic_to_responses(body: dict) -> dict:
     """Convert Anthropic Messages API request to Codex Responses format."""
-    model = body.get("model", "gpt-5.4")
+    model = _resolve_model(body.get("model", "gpt-5.4"))
     messages = body.get("messages", [])
     system = body.get("system", "")
 
@@ -486,7 +503,7 @@ class OpenAIProxy:
         codex_body = _chat_to_responses(body)
         codex_body["stream"] = True
 
-        model = body.get("model", "gpt-5.4")
+        model = codex_body["model"]
         run_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
 
@@ -564,7 +581,7 @@ class OpenAIProxy:
         codex_body = _chat_to_responses(body)
         codex_body["stream"] = True
 
-        model = body.get("model", "gpt-5.4")
+        model = codex_body["model"]
         run_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
         headers = await self.token_manager.get_headers()
@@ -729,8 +746,8 @@ class OpenAIProxy:
     async def responses_proxy(self, body: dict) -> dict:
         """Direct proxy to Codex Responses API (non-streaming)."""
         t0 = time.monotonic()
-        body_copy = _sanitize_responses_body({**body, "stream": True, "store": False})
-        model = body.get("model", "gpt-5.4")
+        model = _resolve_model(body.get("model", "gpt-5.4"))
+        body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
 
@@ -767,8 +784,8 @@ class OpenAIProxy:
     async def responses_proxy_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
         """Direct proxy to Codex Responses API (streaming passthrough)."""
         t0 = time.monotonic()
-        body_copy = _sanitize_responses_body({**body, "stream": True, "store": False})
-        model = body.get("model", "gpt-5.4")
+        model = _resolve_model(body.get("model", "gpt-5.4"))
+        body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
         headers = await self.token_manager.get_headers()
@@ -837,7 +854,7 @@ class OpenAIProxy:
         """Non-streaming Anthropic Messages API via Codex Responses."""
         t0 = time.monotonic()
         codex_body = _anthropic_to_responses(body)
-        model = body.get("model", "gpt-5.4")
+        model = codex_body["model"]
         msg_id = f"msg_{uuid.uuid4().hex[:24]}"
         url = _codex_url()
 
@@ -930,7 +947,7 @@ class OpenAIProxy:
         """Streaming Anthropic Messages API via Codex Responses."""
         t0 = time.monotonic()
         codex_body = _anthropic_to_responses(body)
-        model = body.get("model", "gpt-5.4")
+        model = codex_body["model"]
         msg_id = f"msg_{uuid.uuid4().hex[:24]}"
         url = _codex_url()
         headers = await self.token_manager.get_headers()

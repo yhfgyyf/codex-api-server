@@ -392,7 +392,23 @@ All settings are configurable via environment variables:
 | `CODEX_CLIENT_ID` | *(built-in)* | OAuth client ID for token refresh |
 | `CODEX_DB_PATH` | `~/.codex/api_logs.db` | SQLite database path |
 | `CODEX_EXPORT_DIR` | `~/.codex/exports` | Allowed directory for file exports |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.4` | Default model for unmapped model names |
+| `CODEX_MODEL_ALIASES` | *(none)* | Model name mappings (e.g. `claude-sonnet-4=gpt-5.4`) |
 | `CODEX_MAX_BODY_BYTES` | `10485760` | Max request body size (10 MB) |
+
+### Model Name Mapping
+
+When using non-Codex model names (e.g. Claude Code sending `claude-sonnet-4-20250514`), the server automatically maps them to the default Codex model (`gpt-5.4`).
+
+You can customize mappings via environment variables:
+
+```bash
+# Change default fallback model
+export CODEX_DEFAULT_MODEL=gpt-5.3-codex
+
+# Add explicit model aliases (comma-separated key=value)
+export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.4,claude-haiku=gpt-5.3-codex-spark"
+```
 
 ### Security Recommendations
 
