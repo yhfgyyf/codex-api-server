@@ -145,6 +145,34 @@ async def _handle_anthropic_messages(request: Request):
 
 app.post("/v1/messages")(_handle_anthropic_messages)
 app.post("/messages")(_handle_anthropic_messages)
+app.post("/v1/v1/messages")(_handle_anthropic_messages)
+
+
+async def _handle_count_tokens(request: Request):
+    """Anthropic count_tokens endpoint — return an estimate based on char count."""
+    _check_api_key(request)
+    body = await _read_body(request)
+    messages = body.get("messages", [])
+    system = body.get("system", "")
+
+    # Rough estimate: ~4 chars per token for English, ~2 for CJK
+    char_count = len(str(system))
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    char_count += len(block.get("text", "")) + len(block.get("thinking", ""))
+        elif isinstance(content, str):
+            char_count += len(content)
+    estimated_tokens = max(1, char_count // 3)
+
+    return JSONResponse(content={"input_tokens": estimated_tokens})
+
+
+app.post("/v1/messages/count_tokens")(_handle_count_tokens)
+app.post("/messages/count_tokens")(_handle_count_tokens)
+app.post("/v1/v1/messages/count_tokens")(_handle_count_tokens)
 
 
 # -- Responses API --
