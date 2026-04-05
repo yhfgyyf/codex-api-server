@@ -53,25 +53,29 @@ def _convert_tools_for_codex(tools: list) -> list:
     return codex_tools
 
 
-def _convert_tool_calls_message(msg: dict) -> dict:
-    """Convert assistant message with tool_calls to Codex format."""
-    items = []
+def _convert_tool_calls_message(msg: dict) -> list[dict]:
+    """Convert assistant message with tool_calls to Codex input items.
+
+    Returns a list of top-level input items: a message (if text present)
+    followed by separate function_call items (NOT nested in message content).
+    """
+    result = []
     content = msg.get("content")
     if content:
-        items.append({"type": "output_text", "text": content})
+        result.append({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": content}],
+        })
     for tc in msg.get("tool_calls", []):
         fn = tc.get("function", {})
-        items.append({
+        result.append({
             "type": "function_call",
-            "id": tc.get("id", ""),
+            "call_id": tc.get("id", ""),
             "name": fn.get("name", ""),
             "arguments": fn.get("arguments", "{}"),
         })
-    return {
-        "type": "message",
-        "role": "assistant",
-        "content": items,
-    }
+    return result
 
 
 def _clamp_reasoning_effort(effort: str, model: str) -> str:
@@ -105,7 +109,7 @@ def _chat_to_responses(body: dict) -> dict:
 
         # Handle tool_calls in assistant messages
         if role == "assistant" and msg.get("tool_calls"):
-            input_items.append(_convert_tool_calls_message(msg))
+            input_items.extend(_convert_tool_calls_message(msg))
             continue
 
         # Handle tool/function result messages
@@ -276,28 +280,31 @@ def _anthropic_to_responses(body: dict) -> dict:
                 "content": [{"type": "input_text", "text": text}],
             })
         elif role == "assistant":
-            # Check for tool_use blocks
+            # Check for tool_use blocks — function_call must be top-level input items
             if isinstance(content, list):
-                items = []
+                text_parts = []
+                fc_items = []
                 for block in content:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "text" and block.get("text"):
-                        items.append({"type": "output_text", "text": block["text"]})
+                        text_parts.append(block["text"])
                     elif block.get("type") == "tool_use":
                         inp = block.get("input", {})
-                        items.append({
+                        fc_items.append({
                             "type": "function_call",
-                            "id": block.get("id", ""),
+                            "call_id": block.get("id", ""),
                             "name": block.get("name", ""),
                             "arguments": json.dumps(inp) if isinstance(inp, dict) else str(inp),
                         })
-                if items:
-                    input_items.append({
-                        "type": "message",
-                        "role": "assistant",
-                        "content": items,
-                    })
+                if text_parts or fc_items:
+                    if text_parts:
+                        input_items.append({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "\n".join(text_parts)}],
+                        })
+                    input_items.extend(fc_items)
                     continue
             input_items.append({
                 "type": "message",
