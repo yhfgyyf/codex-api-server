@@ -23,8 +23,10 @@ MAX_BODY_BYTES = int(os.environ.get("CODEX_MAX_BODY_BYTES", str(10 * 1024 * 1024
 
 CODEX_MODELS = [
     "gpt-5.4",
+    "gpt-5.4-mini",
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
+    "gpt-5.2",
     "gpt-5.2-codex",
     "gpt-5.1-codex",
 ]

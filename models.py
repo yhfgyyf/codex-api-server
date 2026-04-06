@@ -7,7 +7,42 @@ from config import CODEX_MODELS
 
 MODEL_METADATA: dict[str, dict[str, Any]] = {
     "gpt-5.4": {
-        "context_window": 1_000_000,
+        "context_window": 1_050_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+    "gpt-5.4-mini": {
+        "context_window": 400_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+    "gpt-5.3-codex": {
+        "context_window": 272_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+    "gpt-5.3-codex-spark": {
+        "context_window": 128_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text"],
+    },
+    "gpt-5.2": {
+        "context_window": 1_050_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+    "gpt-5.2-codex": {
+        "context_window": 272_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+    "gpt-5.1-codex": {
         "max_output_tokens": 128_000,
         "reasoning": True,
         "input_modalities": ["text", "image"],

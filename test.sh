@@ -4,6 +4,7 @@ set -e
 BASE="http://localhost:18888"
 PASS=0
 FAIL=0
+MODELS=("gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
 
 green() { echo -e "\033[32m$1\033[0m"; }
 red() { echo -e "\033[31m$1\033[0m"; }
@@ -24,6 +25,23 @@ run_test() {
     fi
 }
 
+run_python_check() {
+    local name="$1"
+    local script="$2"
+    echo ""
+    echo "=== Test: $name ==="
+    if python3 - <<PY
+$script
+PY
+    then
+        PASS=$((PASS + 1))
+        green "PASS"
+    else
+        FAIL=$((FAIL + 1))
+        red "FAIL"
+    fi
+}
+
 echo "Codex API Server Test Suite"
 echo "============================"
 
@@ -35,11 +53,39 @@ run_test "Health Check" \
 run_test "List Models" \
     curl -sf "${BASE}/v1/models"
 
-# 3. Get specific model
-run_test "Get Model (gpt-5.4)" \
-    curl -sf "${BASE}/v1/models/gpt-5.4"
+# 3. Validate model catalog IDs and metadata
+run_python_check "Model Catalog Metadata" '
+import json
+import urllib.request
 
-# 4. Get non-existent model (expect 404)
+base = "http://localhost:18888"
+models = json.load(urllib.request.urlopen(f"{base}/v1/models"))
+items = {item["id"]: item for item in models["data"]}
+expected_ids = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex"]
+for model_id in expected_ids:
+    assert model_id in items, f"missing model: {model_id}"
+
+assert items["gpt-5.4"]["context_window"] == 1050000
+assert items["gpt-5.4"]["max_output_tokens"] == 128000
+assert items["gpt-5.4-mini"]["context_window"] == 400000
+assert items["gpt-5.4-mini"]["max_output_tokens"] == 128000
+assert items["gpt-5.4-mini"]["reasoning"] is True
+assert items["gpt-5.4-mini"]["input_modalities"] == ["text", "image"]
+assert items["gpt-5.3-codex-spark"]["context_window"] == 128000
+assert items["gpt-5.3-codex-spark"]["max_output_tokens"] == 128000
+assert items["gpt-5.2"]["context_window"] == 1050000
+assert items["gpt-5.2-codex"]["context_window"] == 272000
+assert items["gpt-5.1-codex"]["reasoning"] is True
+print(json.dumps({k: items[k] for k in expected_ids}, indent=2))
+'
+
+# 4. Get specific models
+for model in "${MODELS[@]}"; do
+    run_test "Get Model (${model})" \
+        curl -sf "${BASE}/v1/models/${model}"
+done
+
+# 5. Get non-existent model (expect 404)
 echo ""
 echo "=== Test: Get Non-existent Model (expect 404) ==="
 status=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}/v1/models/nonexistent")
@@ -51,13 +97,15 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 5. Non-streaming chat completion
-run_test "Chat Completion (non-streaming)" \
-    curl -sf --max-time 60 "${BASE}/v1/chat/completions" \
-        -H "Content-Type: application/json" \
-        -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Say just the word hello"}]}'
+# 6. Smoke test all advertised models
+for model in "${MODELS[@]}"; do
+    run_test "Chat Completion (${model})" \
+        curl -sf --max-time 60 "${BASE}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly OK\"}]}"
+done
 
-# 6. Streaming chat completion
+# 7. Streaming chat completion
 echo ""
 echo "=== Test: Chat Completion (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/chat/completions" \
@@ -73,7 +121,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 7. Responses API (streaming)
+# 8. Responses API (streaming)
 echo ""
 echo "=== Test: Responses API (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/responses" \
@@ -89,13 +137,13 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 8. Anthropic Messages API (non-streaming)
+# 9. Anthropic Messages API (non-streaming)
 run_test "Anthropic Messages (non-streaming)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":100,"messages":[{"role":"user","content":"Say just the word hello"}]}'
 
-# 9. Anthropic Messages API (streaming)
+# 10. Anthropic Messages API (streaming)
 echo ""
 echo "=== Test: Anthropic Messages (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/messages" \
@@ -111,21 +159,21 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 10. Anthropic Messages with thinking
+# 11. Anthropic Messages with thinking
 run_test "Anthropic Messages (with thinking)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
 
-# 11. Logs stats
+# 12. Logs stats
 run_test "Logs Stats" \
     curl -sf "${BASE}/v1/logs/stats"
 
-# 12. Logs query
+# 13. Logs query
 run_test "Logs Query" \
     curl -sf "${BASE}/v1/logs?limit=2"
 
-# 13. Export JSONL (download)
+# 14. Export JSONL (download)
 echo ""
 echo "=== Test: Export JSONL ==="
 response=$(curl -sf "${BASE}/v1/logs/export" 2>&1)
