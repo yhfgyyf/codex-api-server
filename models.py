@@ -1,9 +1,18 @@
-import time
 from typing import Any
 
 from pydantic import BaseModel
 
 from config import CODEX_MODELS
+
+
+MODEL_METADATA: dict[str, dict[str, Any]] = {
+    "gpt-5.4": {
+        "context_window": 1_000_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
+}
 
 
 class ModelInfo(BaseModel):
@@ -14,6 +23,10 @@ class ModelInfo(BaseModel):
     permission: list[Any] = []
     root: str = ""
     parent: str | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    reasoning: bool | None = None
+    input_modalities: list[str] | None = None
 
 
 class ModelListResponse(BaseModel):
@@ -21,15 +34,16 @@ class ModelListResponse(BaseModel):
     data: list[ModelInfo]
 
 
+def _build_model_info(model_id: str) -> ModelInfo:
+    return ModelInfo(id=model_id, root=model_id, **MODEL_METADATA.get(model_id, {}))
+
+
 def get_model_list() -> ModelListResponse:
-    models = [
-        ModelInfo(id=model_id, root=model_id)
-        for model_id in CODEX_MODELS
-    ]
+    models = [_build_model_info(model_id) for model_id in CODEX_MODELS]
     return ModelListResponse(data=models)
 
 
 def get_model_info(model_id: str) -> ModelInfo | None:
     if model_id in CODEX_MODELS:
-        return ModelInfo(id=model_id, root=model_id)
+        return _build_model_info(model_id)
     return None

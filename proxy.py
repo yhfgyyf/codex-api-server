@@ -359,7 +359,7 @@ def _anthropic_to_responses(body: dict) -> dict:
             effort = "high"
         result["reasoning"] = {"effort": effort, "summary": "auto"}
     else:
-        result["reasoning"] = {"effort": "medium", "summary": "auto"}
+        result["reasoning"] = {"effort": "high", "summary": "auto"}
 
     return result
 
