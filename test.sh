@@ -4,7 +4,7 @@ set -e
 BASE="http://localhost:18888"
 PASS=0
 FAIL=0
-MODELS=("gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
+MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
 
 green() { echo -e "\033[32m$1\033[0m"; }
 red() { echo -e "\033[31m$1\033[0m"; }
@@ -61,10 +61,14 @@ import urllib.request
 base = "http://localhost:18888"
 models = json.load(urllib.request.urlopen(f"{base}/v1/models"))
 items = {item["id"]: item for item in models["data"]}
-expected_ids = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex"]
+expected_ids = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex"]
 for model_id in expected_ids:
     assert model_id in items, f"missing model: {model_id}"
 
+assert items["gpt-5.5"]["context_window"] == 1000000
+assert items["gpt-5.5"]["max_output_tokens"] == 128000
+assert items["gpt-5.5"]["reasoning"] is True
+assert items["gpt-5.5"]["input_modalities"] == ["text", "image"]
 assert items["gpt-5.4"]["context_window"] == 1050000
 assert items["gpt-5.4"]["max_output_tokens"] == 128000
 assert items["gpt-5.4-mini"]["context_window"] == 400000

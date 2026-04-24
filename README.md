@@ -20,6 +20,7 @@ OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credenti
 
 ## Supported Models
 
+- `gpt-5.5`
 - `gpt-5.4`
 - `gpt-5.4-mini`
 - `gpt-5.3-codex`

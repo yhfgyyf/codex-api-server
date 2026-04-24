@@ -6,6 +6,12 @@ from config import CODEX_MODELS
 
 
 MODEL_METADATA: dict[str, dict[str, Any]] = {
+    "gpt-5.5": {
+        "context_window": 1_000_000,
+        "max_output_tokens": 128_000,
+        "reasoning": True,
+        "input_modalities": ["text", "image"],
+    },
     "gpt-5.4": {
         "context_window": 1_050_000,
         "max_output_tokens": 128_000,

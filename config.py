@@ -22,6 +22,7 @@ EXPORT_DIR = Path(os.environ.get("CODEX_EXPORT_DIR", "~/.codex/exports")).expand
 MAX_BODY_BYTES = int(os.environ.get("CODEX_MAX_BODY_BYTES", str(10 * 1024 * 1024)))
 
 CODEX_MODELS = [
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
