@@ -77,6 +77,34 @@ curl -N http://localhost:18888/v1/chat/completions \
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"high"}'
+
+# Images API generation
+curl http://localhost:18888/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json"}'
+
+# Images API edit (JSON data URL)
+curl http://localhost:18888/v1/images/edits \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"Turn the red square blue","image":"data:image/png;base64,<BASE64_IMAGE>","size":"1024x1024","quality":"medium","response_format":"b64_json"}'
+
+# Responses API canonical image generation
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
+
+# Responses API shorthand image generation
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}'
+
+# Responses API shorthand image edit
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"Turn the red square blue","image":"data:image/png;base64,<BASE64_IMAGE>","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}'
+
+# Export logs as JSONL (includes local image paths when available)
+curl http://localhost:18888/v1/logs/export
 ```
 
 ### With OpenAI Python SDK
@@ -374,6 +402,8 @@ This means you can point any OpenAI SDK or vLLM client at this server without mo
 ```
 
 For image edits, add `image` as a data URL string or array of data URLs. `size` and `quality` are supported; canonical Responses requests should put them inside `tools[0]`, while shorthand requests may put them at the top level. URL responses are not supported.
+
+Generated and edited images are also written to the local image directory (default `~/.codex/images`, configurable via `CODEX_IMAGE_DIR`). Exported logs include local file paths under `request.input_images[].path` and `response.output_images[].path`, while raw base64 stays redacted in SQLite.
 
 ### Log Query Parameters
 

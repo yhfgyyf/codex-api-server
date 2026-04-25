@@ -17,6 +17,7 @@ LOCAL_API_KEY = os.environ.get("CODEX_API_KEY")
 
 DB_PATH = Path(os.environ.get("CODEX_DB_PATH", "~/.codex/api_logs.db")).expanduser()
 EXPORT_DIR = Path(os.environ.get("CODEX_EXPORT_DIR", "~/.codex/exports")).expanduser()
+IMAGE_DIR = Path(os.environ.get("CODEX_IMAGE_DIR", "~/.codex/images")).expanduser()
 
 # Max request body size (10 MB)
 MAX_BODY_BYTES = int(os.environ.get("CODEX_MAX_BODY_BYTES", str(10 * 1024 * 1024)))

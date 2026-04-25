@@ -5,7 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from config import DB_PATH, EXPORT_DIR
+from config import DB_PATH, EXPORT_DIR, IMAGE_DIR
 
 logger = logging.getLogger("codex-api-server.db")
 
@@ -48,6 +48,7 @@ def init_db():
     cursor = _db.execute("SELECT * FROM api_logs LIMIT 0")
     _columns = [desc[0] for desc in cursor.description]
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("Database initialized at %s", DB_PATH)
 
 

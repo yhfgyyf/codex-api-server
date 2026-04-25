@@ -115,14 +115,13 @@ done
 # 7. Image generation
 echo ""
 echo "=== Test: Image Generation (gpt-image-2) ==="
-response=$(curl -sf --max-time 180 "${BASE}/v1/images/generations" \
+if curl -sf --max-time 180 "${BASE}/v1/images/generations" \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","n":1,"response_format":"b64_json"}' 2>&1)
-if RESPONSE="$response" python3 - <<'PY'
+    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","n":1,"response_format":"b64_json"}' > /tmp/codex-image-generation.json 2>/tmp/codex-image-generation.err && python3 - <<'PY'
 import json
-import os
-payload = json.loads(os.environ["RESPONSE"])
-image = payload["data"][0]["b64_json"]
+from pathlib import Path
+payload = json.loads(Path('/tmp/codex-image-generation.json').read_text())
+image = payload['data'][0]['b64_json']
 assert isinstance(image, str) and len(image) > 1000
 print(f"b64_json length: {len(image)}")
 PY
@@ -130,7 +129,13 @@ then
     green "PASS"
     PASS=$((PASS + 1))
 else
-    echo "$response" | head -5
+    python3 - <<'PY'
+from pathlib import Path
+for path in ('/tmp/codex-image-generation.err', '/tmp/codex-image-generation.json'):
+    p = Path(path)
+    if p.exists():
+        print(p.read_text()[:1000])
+PY
     red "FAIL"
     FAIL=$((FAIL + 1))
 fi
@@ -202,14 +207,14 @@ fi
 # 10. Responses API image generation shorthand
 echo ""
 echo "=== Test: Responses API Image Generation (gpt-image-2) ==="
-if response=$(curl -sf --max-time 180 "${BASE}/v1/responses" \
+if curl -sf --max-time 180 "${BASE}/v1/responses" \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}' 2>&1); then
-    if RESPONSE="$response" python3 - <<'PY'
+    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}' > /tmp/codex-responses-image.json 2>/tmp/codex-responses-image.err; then
+    if python3 - <<'PY'
 import json
-import os
-payload = json.loads(os.environ["RESPONSE"])
-images = [item["result"] for item in payload.get("output", []) if item.get("type") == "image_generation_call" and item.get("result")]
+from pathlib import Path
+payload = json.loads(Path('/tmp/codex-responses-image.json').read_text())
+images = [item['result'] for item in payload.get('output', []) if item.get('type') == 'image_generation_call' and item.get('result')]
 assert images and len(images[0]) > 1000
 print(f"b64_json length: {len(images[0])}")
 PY
@@ -217,12 +222,24 @@ PY
         green "PASS"
         PASS=$((PASS + 1))
     else
-        echo "$response" | head -5
+        python3 - <<'PY'
+from pathlib import Path
+for path in ('/tmp/codex-responses-image.err', '/tmp/codex-responses-image.json'):
+    p = Path(path)
+    if p.exists():
+        print(p.read_text()[:1000])
+PY
         red "FAIL"
         FAIL=$((FAIL + 1))
     fi
 else
-    echo "$response" | head -5
+    python3 - <<'PY'
+from pathlib import Path
+for path in ('/tmp/codex-responses-image.err', '/tmp/codex-responses-image.json'):
+    p = Path(path)
+    if p.exists():
+        print(p.read_text()[:1000])
+PY
     red "FAIL"
     FAIL=$((FAIL + 1))
 fi
@@ -276,7 +293,61 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 12. Responses API (streaming)
+# 12. Logged image paths
+echo ""
+echo "=== Test: Logged Image Paths ==="
+if python3 - <<'PY'
+import json
+import urllib.request
+from pathlib import Path
+
+base = 'http://localhost:18888'
+logs = json.load(urllib.request.urlopen(f'{base}/v1/logs?limit=20')))
+rows = logs['data']
+assert rows, 'no logs returned'
+def parse_field(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+def row_request(row):
+    return parse_field(row.get('request'))
+def row_response(row):
+    return parse_field(row.get('response'))
+image_gen = next((row for row in rows if row['endpoint'] == 'images/generations' and row_response(row).get('output_images')), None)
+image_edit = next((row for row in rows if row['endpoint'] == 'images/edits' and row_request(row).get('input_images') and row_response(row).get('output_images')), None)
+responses = next((row for row in rows if row['endpoint'] == 'responses' and row_response(row).get('output_images')), None)
+assert image_gen is not None, 'images/generations output_images missing'
+assert image_edit is not None, 'images/edits input/output images missing'
+assert responses is not None, 'responses output_images missing'
+for path in [
+    image_gen['response']['output_images'][0]['path'],
+    image_edit['request']['input_images'][0]['path'],
+    image_edit['response']['output_images'][0]['path'],
+    responses['response']['output_images'][0]['path'],
+]:
+    assert Path(path).is_file(), path
+print(json.dumps({
+    'images_generations_output': image_gen['response']['output_images'][0]['path'],
+    'images_edits_input': image_edit['request']['input_images'][0]['path'],
+    'images_edits_output': image_edit['response']['output_images'][0]['path'],
+    'responses_output': responses['response']['output_images'][0]['path'],
+}, indent=2))
+PY
+then
+    green "PASS"
+    PASS=$((PASS + 1))
+else
+    red "FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
+# 13. Responses API (streaming)
 echo ""
 echo "=== Test: Responses API (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/responses" \
@@ -292,13 +363,13 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 13. Anthropic Messages API (non-streaming)
+# 14. Anthropic Messages API (non-streaming)
 run_test "Anthropic Messages (non-streaming)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":100,"messages":[{"role":"user","content":"Say just the word hello"}]}'
 
-# 14. Anthropic Messages API (streaming)
+# 15. Anthropic Messages API (streaming)
 echo ""
 echo "=== Test: Anthropic Messages (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/messages" \
@@ -314,21 +385,21 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 15. Anthropic Messages with thinking
+# 16. Anthropic Messages with thinking
 run_test "Anthropic Messages (with thinking)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
 
-# 16. Logs stats
+# 17. Logs stats
 run_test "Logs Stats" \
     curl -sf "${BASE}/v1/logs/stats"
 
-# 17. Logs query
+# 18. Logs query
 run_test "Logs Query" \
     curl -sf "${BASE}/v1/logs?limit=2"
 
-# 18. Export JSONL (download)
+# 19. Export JSONL (download)
 echo ""
 echo "=== Test: Export JSONL ==="
 response=$(curl -sf "${BASE}/v1/logs/export" 2>&1)

@@ -1,13 +1,15 @@
+import base64
 import json
 import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import httpx
 
 from auth import TokenManager
-from config import CODEX_BASE_URL, CODEX_MODELS, CODEX_RESPONSES_PATH, DEFAULT_CODEX_MODEL, MODEL_ALIASES
+from config import CODEX_BASE_URL, CODEX_MODELS, CODEX_RESPONSES_PATH, DEFAULT_CODEX_MODEL, IMAGE_DIR, MODEL_ALIASES
 from db import save_log
 
 logger = logging.getLogger("codex-api-server.proxy")
@@ -461,6 +463,67 @@ def _clamp_image_count(value: object) -> int:
     return 1
 
 
+def _write_image_asset(request_id: str, kind: str, index: int, data: bytes, extension: str) -> str:
+    directory = IMAGE_DIR / request_id
+    directory.mkdir(parents=True, exist_ok=True)
+    file_path = directory / f"{kind}-{index}.{extension}"
+    file_path.write_bytes(data)
+    return str(file_path)
+
+
+def _decode_data_url_image(data_url: str) -> tuple[str, bytes, str]:
+    header, encoded = data_url.split(",", 1)
+    mime_type = header[5:].split(";", 1)[0] if header.startswith("data:") else "image/png"
+    extension = mime_type.split("/")[-1] if "/" in mime_type else "png"
+    return mime_type, base64.b64decode(encoded), extension
+
+
+def _persist_input_images(request_id: str, input_images: list[str]) -> list[dict]:
+    persisted = []
+    for index, image_url in enumerate(input_images):
+        if not isinstance(image_url, str) or not image_url.startswith("data:"):
+            continue
+        mime_type, data, extension = _decode_data_url_image(image_url)
+        path = _write_image_asset(request_id, "input", index, data, extension)
+        persisted.append({"index": index, "path": path, "mime_type": mime_type, "size_bytes": len(data)})
+    return persisted
+
+
+def _persist_output_images(request_id: str, output_items: list[dict]) -> list[dict]:
+    persisted = []
+    for index, item in enumerate(output_items):
+        result = item.get("result")
+        if not isinstance(result, str) or not result:
+            continue
+        mime_type = "image/png"
+        output_format = item.get("output_format") or "png"
+        extension = output_format if isinstance(output_format, str) else "png"
+        data = base64.b64decode(result)
+        path = _write_image_asset(request_id, "output", index, data, extension)
+        image = {"index": index, "path": path, "mime_type": mime_type, "size_bytes": len(data)}
+        revised_prompt = item.get("revised_prompt")
+        if revised_prompt:
+            image["revised_prompt"] = revised_prompt
+        persisted.append(image)
+    return persisted
+
+
+def _attach_logged_input_images(body: dict, input_images: list[dict]) -> dict:
+    logged = _redact_image_request(body)
+    if input_images:
+        logged["input_images"] = input_images
+        if "image" in logged:
+            logged["image"] = "<redacted>"
+    return logged
+
+
+def _attach_logged_output_images(response_obj: dict, output_images: list[dict]) -> dict:
+    logged = _redact_image_response(response_obj)
+    if output_images:
+        logged["output_images"] = output_images
+    return logged
+
+
 def _redact_image_request(body: dict) -> dict:
     def redact(value):
         if isinstance(value, str) and value.startswith("data:"):
@@ -473,8 +536,8 @@ def _redact_image_request(body: dict) -> dict:
 
     redacted = redact(dict(body))
     for key in ("image", "input_images"):
-        if key in redacted:
-            redacted[key] = "<redacted>"
+        if key in redacted and redacted[key] == "<redacted>":
+            continue
     return redacted
 
 
@@ -893,6 +956,7 @@ class OpenAIProxy:
         final_responses = []
         status = "ok"
         err = None
+        logged_input_images = _persist_input_images(request_id, input_images or [])
         content = [{"type": "input_text", "text": prompt}]
         for image_url in input_images or []:
             content.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
@@ -949,18 +1013,28 @@ class OpenAIProxy:
             data.extend(image_results)
 
         duration_ms = int((time.monotonic() - t0) * 1000)
+        logged_request = _attach_logged_input_images(body, logged_input_images)
         if err:
-            await save_log(request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, err, status="error", duration_ms=duration_ms)
+            await save_log(request_id, endpoint, model, False, logged_request, err, status="error", duration_ms=duration_ms)
             return err
         if not data:
             err = {"error": {"message": "No image received", "type": "api_error"}}
-            await save_log(request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, err, status="error", duration_ms=duration_ms)
+            await save_log(request_id, endpoint, model, False, logged_request, err, status="error", duration_ms=duration_ms)
             return err
 
         result = {"created": int(time.time()), "data": data[:count]}
+        output_items = []
+        for index, image in enumerate(result["data"]):
+            output_items.append({
+                "type": "image_generation_call",
+                "result": image["b64_json"],
+                "output_format": body.get("output_format", "png"),
+                "revised_prompt": image.get("revised_prompt"),
+            })
+        logged_output_images = _persist_output_images(request_id, output_items)
         usage = _extract_usage_from_response(final_responses[-1]) if final_responses else {}
         await save_log(
-            request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, {"created": result["created"], "data_count": len(result["data"])},
+            request_id, endpoint, model, False, logged_request, {"created": result["created"], "data_count": len(result["data"]), "output_images": logged_output_images},
             status=status,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
@@ -989,6 +1063,12 @@ class OpenAIProxy:
 
         final_response = None
         output_items = []
+        logged_input_images = []
+        for message in body.get("input", []):
+            for content_item in message.get("content", []):
+                image_url = content_item.get("image_url") if isinstance(content_item, dict) else None
+                if isinstance(image_url, str) and image_url.startswith("data:"):
+                    logged_input_images.extend(_persist_input_images(request_id, [image_url]))
         async for kind, data in self._stream_with_retry(url, body_copy):
             if kind == "error":
                 duration_ms = int((time.monotonic() - t0) * 1000)
@@ -1017,9 +1097,13 @@ class OpenAIProxy:
         result = final_response or {"error": {"message": "No response received"}}
         duration_ms = int((time.monotonic() - t0) * 1000)
 
+        output_image_items = [item for item in result.get("output", []) if isinstance(item, dict) and item.get("type") == "image_generation_call" and item.get("result")]
+        logged_output_images = _persist_output_images(request_id, output_image_items)
+        logged_request = _attach_logged_input_images(original_body, logged_input_images)
+        logged_response = _attach_logged_output_images(result, logged_output_images)
         usage = _extract_usage_from_response(result) if final_response else {}
         await save_log(
-            request_id, "responses", model, False, _redact_image_request(original_body), _redact_image_response(result),
+            request_id, "responses", model, False, logged_request, logged_response,
             status="ok" if final_response else "error",
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
@@ -1046,6 +1130,13 @@ class OpenAIProxy:
         collected_text = ""
         usage = {}
         status = "ok"
+        output_items = []
+        logged_input_images = []
+        for message in body.get("input", []):
+            for content_item in message.get("content", []):
+                image_url = content_item.get("image_url") if isinstance(content_item, dict) else None
+                if isinstance(image_url, str) and image_url.startswith("data:"):
+                    logged_input_images.extend(_persist_input_images(request_id, [image_url]))
 
         async with self.client.stream("POST", url, json=body_copy, headers=headers) as resp:
             if resp.status_code >= 400:
@@ -1071,6 +1162,10 @@ class OpenAIProxy:
                             if delta:
                                 collected_text += delta
                             event_type = event.get("type", "")
+                            if event_type == "response.output_item.done":
+                                item = event.get("item")
+                                if isinstance(item, dict):
+                                    output_items.append(item)
                             if event_type in ("response.completed", "response.done"):
                                 response_obj = event.get("response", {})
                                 usage = _extract_usage_from_response(response_obj)
@@ -1084,14 +1179,19 @@ class OpenAIProxy:
             yield b"\n"
 
         duration_ms = int((time.monotonic() - t0) * 1000)
+        logged_output_images = _persist_output_images(
+            request_id,
+            [item for item in output_items if isinstance(item, dict) and item.get("type") == "image_generation_call" and item.get("result")],
+        )
         response_summary = {
             "id": request_id,
             "model": model,
             "content": collected_text,
             "usage": usage,
+            "output_images": logged_output_images,
         }
         await save_log(
-            request_id, "responses", model, True, _redact_image_request(original_body), response_summary,
+            request_id, "responses", model, True, _attach_logged_input_images(original_body, logged_input_images), response_summary,
             status=status,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),

@@ -75,6 +75,34 @@ curl -N http://localhost:18888/v1/chat/completions \
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"逐步计算 15*37"}],"reasoning_effort":"high"}'
+
+# Images API 生成
+curl http://localhost:18888/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json"}'
+
+# Images API 编辑（JSON data URL）
+curl http://localhost:18888/v1/images/edits \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"Turn the red square blue","image":"data:image/png;base64,<BASE64_IMAGE>","size":"1024x1024","quality":"medium","response_format":"b64_json"}'
+
+# Responses API 标准图片生成
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-5.4","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
+
+# Responses API 简写图片生成
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}'
+
+# Responses API 简写图片编辑
+curl http://localhost:18888/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"Turn the red square blue","image":"data:image/png;base64,<BASE64_IMAGE>","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}'
+
+# 导出日志 JSONL（如有图片会包含本地路径）
+curl http://localhost:18888/v1/logs/export
 ```
 
 ### 使用 OpenAI Python SDK
@@ -370,6 +398,8 @@ curl http://localhost:18888/v1/chat/completions \
 ```
 
 图片编辑时，增加 `image` 字段，值为 data URL 字符串或 data URL 数组。`size` 和 `quality` 均支持；标准 Responses 请求应放在 `tools[0]` 中，简写请求可放在顶层。不支持 URL 响应。
+
+生成和编辑后的图片也会写入本地图片目录（默认 `~/.codex/images`，可通过 `CODEX_IMAGE_DIR` 配置）。导出的日志会在 `request.input_images[].path` 和 `response.output_images[].path` 中带上本地文件路径，而 SQLite 中的原始 base64 仍会脱敏。
 
 ### 日志查询参数
 
