@@ -28,6 +28,7 @@ OpenAI API-compatible proxy server that uses ChatGPT Plus (Codex) OAuth credenti
 - `gpt-5.2`
 - `gpt-5.2-codex`
 - `gpt-5.1-codex`
+- `gpt-image-2`
 
 ## Prerequisites
 
@@ -351,10 +352,28 @@ This means you can point any OpenAI SDK or vLLM client at this server without mo
 | POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
 | POST | `/v1/messages` | Anthropic Messages API (streaming + non-streaming) |
 | POST | `/v1/responses` | OpenAI Responses API proxy |
+| POST | `/v1/images/generations` | OpenAI Images API generation (`b64_json`) |
+| POST | `/v1/images/edits` | OpenAI Images API edit (`b64_json`, multipart or JSON data URL) |
 | GET | `/v1/logs` | Query API call logs |
 | GET | `/v1/logs/stats` | Log statistics |
 | GET | `/v1/logs/export` | Download logs as JSONL |
 | POST | `/v1/logs/export/file` | Export logs to a local file |
+
+### Responses API image generation
+
+`/v1/responses` supports image generation and editing with `gpt-image-2` either as canonical Responses `input` + `tools` payloads, or with this server's shorthand fields:
+
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "A tiny red square icon on a white background",
+  "size": "1024x1024",
+  "quality": "medium",
+  "response_format": "b64_json"
+}
+```
+
+For image edits, add `image` as a data URL string or array of data URLs. `size` and `quality` are supported; canonical Responses requests should put them inside `tools[0]`, while shorthand requests may put them at the top level. URL responses are not supported.
 
 ### Log Query Parameters
 

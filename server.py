@@ -1,9 +1,10 @@
+import base64
 import logging
 import time
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -66,6 +67,71 @@ async def _read_body(request: Request) -> dict:
         return __import__("json").loads(body_bytes)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+
+def _invalid_request(message: str) -> dict:
+    return {"error": {"message": message, "type": "invalid_request_error"}}
+
+
+def _is_upload_file(value: object) -> bool:
+    return hasattr(value, "read") and hasattr(value, "filename")
+
+
+async def _data_url_from_upload(upload: object) -> str:
+    data = await upload.read()
+    if len(data) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail=f"Image too large (limit {MAX_BODY_BYTES} bytes)")
+    mime_type = getattr(upload, "content_type", None) or "image/png"
+    return f"data:{mime_type};base64,{base64.b64encode(data).decode()}"
+
+
+def _collect_json_images(body: dict) -> list[str] | dict:
+    images = body.get("image")
+    if images is None:
+        return _invalid_request("image is required")
+    if isinstance(images, str):
+        image_list = [images]
+    elif isinstance(images, list) and all(isinstance(item, str) for item in images):
+        image_list = images
+    else:
+        return _invalid_request("image must be a data URL string or array of data URL strings")
+    if not image_list:
+        return _invalid_request("image is required")
+    if len(image_list) > 5:
+        return _invalid_request("at most 5 input images are supported")
+    return image_list
+
+
+async def _read_image_edit_body(request: Request) -> dict:
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        body = await _read_body(request)
+        if body.get("mask") is not None:
+            return _invalid_request("mask is not supported")
+        images = _collect_json_images(body)
+        if isinstance(images, dict):
+            return images
+        return {**body, "input_images": images}
+
+    form = await request.form()
+    if form.get("mask") is not None:
+        return _invalid_request("mask is not supported")
+    body: dict = {}
+    for key in ("model", "prompt", "n", "size", "response_format", "quality", "output_format", "background", "output_compression"):
+        value = form.get(key)
+        if value is not None and not _is_upload_file(value):
+            body[key] = value
+    uploads = []
+    for key in ("image", "image[]"):
+        for value in form.getlist(key):
+            if _is_upload_file(value):
+                uploads.append(value)
+    if not uploads:
+        return _invalid_request("image is required")
+    if len(uploads) > 5:
+        return _invalid_request("at most 5 input images are supported")
+    body["input_images"] = [await _data_url_from_upload(upload) for upload in uploads]
+    return body
 
 
 # -- Health --
@@ -173,6 +239,28 @@ async def _handle_count_tokens(request: Request):
 app.post("/v1/messages/count_tokens")(_handle_count_tokens)
 app.post("/messages/count_tokens")(_handle_count_tokens)
 app.post("/v1/v1/messages/count_tokens")(_handle_count_tokens)
+
+
+# -- Images API --
+
+@app.post("/v1/images/generations")
+async def images_generations(request: Request):
+    _check_api_key(request)
+    body = await _read_body(request)
+    result = await proxy.images_generations(body)
+    status_code = 400 if isinstance(result, dict) and "error" in result else 200
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@app.post("/v1/images/edits")
+async def images_edits(request: Request):
+    _check_api_key(request)
+    body = await _read_image_edit_body(request)
+    if "error" in body:
+        return JSONResponse(content=body, status_code=400)
+    result = await proxy.images_edits(body)
+    status_code = 400 if isinstance(result, dict) and "error" in result else 200
+    return JSONResponse(content=result, status_code=status_code)
 
 
 # -- Responses API --

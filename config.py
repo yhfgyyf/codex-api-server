@@ -30,6 +30,7 @@ CODEX_MODELS = [
     "gpt-5.2",
     "gpt-5.2-codex",
     "gpt-5.1-codex",
+    "gpt-image-2",
 ]
 
 # Default model used when incoming model name is not a Codex model

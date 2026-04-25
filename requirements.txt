@@ -3,3 +3,4 @@ uvicorn[standard]>=0.34.0
 httpx[http2]>=0.28.0
 pydantic>=2.10.0
 pyjwt>=2.10.0
+python-multipart>=0.0.20

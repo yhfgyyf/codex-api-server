@@ -26,6 +26,7 @@
 - `gpt-5.2`
 - `gpt-5.2-codex`
 - `gpt-5.1-codex`
+- `gpt-image-2`
 
 ## 前置条件
 
@@ -347,10 +348,28 @@ curl http://localhost:18888/v1/chat/completions \
 | POST | `/v1/chat/completions` | 对话补全（流式 + 非流式） |
 | POST | `/v1/messages` | Anthropic Messages API（流式 + 非流式） |
 | POST | `/v1/responses` | OpenAI Responses API 代理 |
+| POST | `/v1/images/generations` | OpenAI Images API 生成（`b64_json`） |
+| POST | `/v1/images/edits` | OpenAI Images API 编辑（`b64_json`，multipart 或 JSON data URL） |
 | GET | `/v1/logs` | 查询 API 调用日志 |
 | GET | `/v1/logs/stats` | 日志统计 |
 | GET | `/v1/logs/export` | 下载 JSONL 日志 |
 | POST | `/v1/logs/export/file` | 导出日志到本地文件 |
+
+### Responses API 图片生成
+
+`/v1/responses` 支持通过 `gpt-image-2` 生成和编辑图片。可以使用标准 Responses `input` + `tools` 结构，也可以使用本服务器提供的简写字段：
+
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "A tiny red square icon on a white background",
+  "size": "1024x1024",
+  "quality": "medium",
+  "response_format": "b64_json"
+}
+```
+
+图片编辑时，增加 `image` 字段，值为 data URL 字符串或 data URL 数组。`size` 和 `quality` 均支持；标准 Responses 请求应放在 `tools[0]` 中，简写请求可放在顶层。不支持 URL 响应。
 
 ### 日志查询参数
 

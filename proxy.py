@@ -448,6 +448,129 @@ def _extract_usage_from_response(response_obj: dict) -> dict:
     }
 
 
+def _clamp_image_count(value: object) -> int:
+    if isinstance(value, bool):
+        return 1
+    if isinstance(value, int | float):
+        return max(1, min(4, int(value)))
+    if isinstance(value, str):
+        try:
+            return max(1, min(4, int(value)))
+        except ValueError:
+            return 1
+    return 1
+
+
+def _redact_image_request(body: dict) -> dict:
+    def redact(value):
+        if isinstance(value, str) and value.startswith("data:"):
+            return "<redacted>"
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        return value
+
+    redacted = redact(dict(body))
+    for key in ("image", "input_images"):
+        if key in redacted:
+            redacted[key] = "<redacted>"
+    return redacted
+
+
+def _redact_image_response(response_obj: dict) -> dict:
+    if not isinstance(response_obj, dict):
+        return response_obj
+    redacted = dict(response_obj)
+    output = []
+    for item in response_obj.get("output", []):
+        if not isinstance(item, dict):
+            output.append(item)
+            continue
+        item_copy = dict(item)
+        if item_copy.get("type") == "image_generation_call" and item_copy.get("result"):
+            item_copy["result"] = "<redacted>"
+        output.append(item_copy)
+    if output:
+        redacted["output"] = output
+    return redacted
+
+
+def _image_generation_tool(body: dict) -> dict:
+    tool = {
+        "type": "image_generation",
+        "model": body.get("model", "gpt-image-2"),
+        "size": body.get("size", "1024x1024"),
+    }
+    for source_key, target_key in (
+        ("quality", "quality"),
+        ("output_format", "output_format"),
+        ("background", "background"),
+        ("output_compression", "output_compression"),
+    ):
+        if source_key in body:
+            tool[target_key] = body[source_key]
+    return tool
+
+
+def _extract_image_results_from_response(response_obj: dict) -> list[dict]:
+    results = []
+    for item in response_obj.get("output", []):
+        if item.get("type") == "image_generation_call" and item.get("result"):
+            image = {"b64_json": item["result"]}
+            revised_prompt = item.get("revised_prompt")
+            if revised_prompt:
+                image["revised_prompt"] = revised_prompt
+            results.append(image)
+    return results
+
+
+def _is_responses_image_shorthand(body: dict) -> bool:
+    return "input" not in body and any(key in body for key in ("prompt", "image", "input_images"))
+
+
+def _normalize_image_list(value: object) -> list[str] | None:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return None
+
+
+def _normalize_responses_image_body(body: dict) -> dict:
+    if not _is_responses_image_shorthand(body):
+        return body
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {"error": {"message": "prompt is required", "type": "invalid_request_error"}}
+    response_format = body.get("response_format", "b64_json")
+    if response_format != "b64_json":
+        return {"error": {"message": "Only response_format=b64_json is supported", "type": "invalid_request_error"}}
+    count = _clamp_image_count(body.get("n", 1))
+    if count != 1:
+        return {"error": {"message": "/v1/responses image shorthand supports one image per request", "type": "invalid_request_error"}}
+    image_value = body.get("input_images", body.get("image"))
+    images = _normalize_image_list(image_value)
+    if images is None:
+        return {"error": {"message": "image must be a data URL string or array of data URL strings", "type": "invalid_request_error"}}
+    if len(images) > 5:
+        return {"error": {"message": "at most 5 input images are supported", "type": "invalid_request_error"}}
+    content = [{"type": "input_text", "text": prompt}]
+    for image_url in images:
+        content.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
+    return {
+        "model": "gpt-5.4",
+        "instructions": body.get("instructions", "You are an image generation assistant."),
+        "input": [{"type": "message", "role": "user", "content": content}],
+        "tools": [_image_generation_tool(body)],
+        "tool_choice": {"type": "image_generation"},
+        "stream": body.get("stream", False),
+        "store": False,
+    }
+
+
 async def _stream_and_collect(client: httpx.AsyncClient, url: str, body: dict, headers: dict):
     """Stream from Codex, yield parsed events. Retry once on 401/403."""
     async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -750,15 +873,122 @@ class OpenAIProxy:
             duration_ms=duration_ms,
         )
 
+    async def _run_image_generation(self, body: dict, endpoint: str, input_images: list[str] | None = None) -> dict:
+        t0 = time.monotonic()
+        prompt = body.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {"error": {"message": "prompt is required", "type": "invalid_request_error"}}
+
+        model = body.get("model", "gpt-image-2")
+        if model != "gpt-image-2":
+            return {"error": {"message": f"Unsupported image model: {model}", "type": "invalid_request_error"}}
+        response_format = body.get("response_format", "b64_json")
+        if response_format != "b64_json":
+            return {"error": {"message": "Only response_format=b64_json is supported", "type": "invalid_request_error"}}
+
+        request_id = f"img-{uuid.uuid4().hex[:24]}"
+        url = _codex_url()
+        count = _clamp_image_count(body.get("n", 1))
+        data: list[dict] = []
+        final_responses = []
+        status = "ok"
+        err = None
+        content = [{"type": "input_text", "text": prompt}]
+        for image_url in input_images or []:
+            content.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
+
+        for _ in range(count):
+            codex_body = {
+                "model": "gpt-5.4",
+                "instructions": "You are an image generation assistant.",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": content,
+                }],
+                "tools": [_image_generation_tool(body)],
+                "tool_choice": {"type": "image_generation"},
+                "stream": True,
+                "store": False,
+            }
+
+            final_response = None
+            image_results: list[dict] = []
+            async for kind, event in self._stream_with_retry(url, codex_body):
+                if kind == "error":
+                    status = "error"
+                    try:
+                        err = json.loads(event)
+                    except Exception:
+                        err = {"error": {"message": event.decode(errors="replace"), "type": "api_error"}}
+                    break
+
+                event_type = event.get("type", "")
+                if event_type in ("error", "response.failed"):
+                    status = "error"
+                    error = event.get("error", {})
+                    err = {"error": {"message": error.get("message", "Image generation failed"), "type": error.get("type", "api_error"), "code": error.get("code")}}
+                    break
+                if event_type == "response.output_item.done":
+                    item = event.get("item", {})
+                    if item.get("type") == "image_generation_call" and item.get("result"):
+                        image = {"b64_json": item["result"]}
+                        revised_prompt = item.get("revised_prompt")
+                        if revised_prompt:
+                            image["revised_prompt"] = revised_prompt
+                        image_results.append(image)
+                elif event_type in ("response.completed", "response.done"):
+                    final_response = event.get("response", event)
+
+            if err:
+                break
+            if final_response:
+                final_responses.append(final_response)
+                if not image_results:
+                    image_results = _extract_image_results_from_response(final_response)
+            data.extend(image_results)
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        if err:
+            await save_log(request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, err, status="error", duration_ms=duration_ms)
+            return err
+        if not data:
+            err = {"error": {"message": "No image received", "type": "api_error"}}
+            await save_log(request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, err, status="error", duration_ms=duration_ms)
+            return err
+
+        result = {"created": int(time.time()), "data": data[:count]}
+        usage = _extract_usage_from_response(final_responses[-1]) if final_responses else {}
+        await save_log(
+            request_id, endpoint, model, False, _redact_image_request(body) if input_images else body, {"created": result["created"], "data_count": len(result["data"])},
+            status=status,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            duration_ms=duration_ms,
+        )
+        return result
+
+    async def images_generations(self, body: dict) -> dict:
+        return await self._run_image_generation(body, "images/generations")
+
+    async def images_edits(self, body: dict) -> dict:
+        return await self._run_image_generation(body, "images/edits", body.get("input_images", []))
+
     async def responses_proxy(self, body: dict) -> dict:
         """Direct proxy to Codex Responses API (non-streaming)."""
         t0 = time.monotonic()
+        original_body = body
+        body = _normalize_responses_image_body(body)
+        if "error" in body:
+            return body
         model = _resolve_model(body.get("model", "gpt-5.4"))
         body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
 
         final_response = None
+        output_items = []
         async for kind, data in self._stream_with_retry(url, body_copy):
             if kind == "error":
                 duration_ms = int((time.monotonic() - t0) * 1000)
@@ -766,20 +996,30 @@ class OpenAIProxy:
                     err = json.loads(data)
                 except Exception:
                     err = {"error": {"message": data.decode(errors="replace")}}
-                await save_log(request_id, "responses", model, False, body, err,
+                await save_log(request_id, "responses", model, False, _redact_image_request(original_body), err,
                                status="error", duration_ms=duration_ms)
                 return err
 
             event = data
-            if event.get("type") in ("response.completed", "response.done"):
+            event_type = event.get("type", "")
+            if event_type == "response.output_item.done":
+                item = event.get("item")
+                if isinstance(item, dict):
+                    output_items.append(item)
+            elif event_type in ("response.completed", "response.done"):
                 final_response = event.get("response", event)
 
+        if final_response and output_items:
+            existing_ids = {item.get("id") for item in final_response.get("output", []) if isinstance(item, dict)}
+            final_response["output"] = final_response.get("output", []) + [
+                item for item in output_items if item.get("id") not in existing_ids
+            ]
         result = final_response or {"error": {"message": "No response received"}}
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         usage = _extract_usage_from_response(result) if final_response else {}
         await save_log(
-            request_id, "responses", model, False, body, result,
+            request_id, "responses", model, False, _redact_image_request(original_body), _redact_image_response(result),
             status="ok" if final_response else "error",
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
@@ -791,6 +1031,12 @@ class OpenAIProxy:
     async def responses_proxy_stream(self, body: dict) -> AsyncGenerator[bytes, None]:
         """Direct proxy to Codex Responses API (streaming passthrough)."""
         t0 = time.monotonic()
+        original_body = body
+        body = _normalize_responses_image_body(body)
+        if "error" in body:
+            yield b"data: " + json.dumps(body).encode() + b"\n\n"
+            yield b"data: [DONE]\n\n"
+            return
         model = _resolve_model(body.get("model", "gpt-5.4"))
         body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
@@ -809,7 +1055,7 @@ class OpenAIProxy:
                     err = json.loads(error_body)
                 except Exception:
                     err = {"error": {"message": error_body.decode(errors="replace")}}
-                await save_log(request_id, "responses", model, True, body, err,
+                await save_log(request_id, "responses", model, True, _redact_image_request(original_body), err,
                                status="error", duration_ms=duration_ms)
                 yield b"data: " + error_body + b"\n\n"
                 yield b"data: [DONE]\n\n"
@@ -845,7 +1091,7 @@ class OpenAIProxy:
             "usage": usage,
         }
         await save_log(
-            request_id, "responses", model, True, body, response_summary,
+            request_id, "responses", model, True, _redact_image_request(original_body), response_summary,
             status=status,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),

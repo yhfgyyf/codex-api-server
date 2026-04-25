@@ -4,7 +4,8 @@ set -e
 BASE="http://localhost:18888"
 PASS=0
 FAIL=0
-MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
+MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex" "gpt-image-2")
+CHAT_MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
 
 green() { echo -e "\033[32m$1\033[0m"; }
 red() { echo -e "\033[31m$1\033[0m"; }
@@ -61,11 +62,11 @@ import urllib.request
 base = "http://localhost:18888"
 models = json.load(urllib.request.urlopen(f"{base}/v1/models"))
 items = {item["id"]: item for item in models["data"]}
-expected_ids = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex"]
+expected_ids = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex", "gpt-image-2"]
 for model_id in expected_ids:
     assert model_id in items, f"missing model: {model_id}"
 
-assert items["gpt-5.5"]["context_window"] == 1000000
+assert items["gpt-5.5"]["context_window"] == 272000
 assert items["gpt-5.5"]["max_output_tokens"] == 128000
 assert items["gpt-5.5"]["reasoning"] is True
 assert items["gpt-5.5"]["input_modalities"] == ["text", "image"]
@@ -80,6 +81,8 @@ assert items["gpt-5.3-codex-spark"]["max_output_tokens"] == 128000
 assert items["gpt-5.2"]["context_window"] == 1050000
 assert items["gpt-5.2-codex"]["context_window"] == 272000
 assert items["gpt-5.1-codex"]["reasoning"] is True
+assert items["gpt-image-2"]["reasoning"] is False
+assert items["gpt-image-2"]["input_modalities"] == ["text", "image"]
 print(json.dumps({k: items[k] for k in expected_ids}, indent=2))
 '
 
@@ -102,14 +105,85 @@ else
 fi
 
 # 6. Smoke test all advertised models
-for model in "${MODELS[@]}"; do
+for model in "${CHAT_MODELS[@]}"; do
     run_test "Chat Completion (${model})" \
         curl -sf --max-time 60 "${BASE}/v1/chat/completions" \
             -H "Content-Type: application/json" \
             -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly OK\"}]}"
 done
 
-# 7. Streaming chat completion
+# 7. Image generation
+echo ""
+echo "=== Test: Image Generation (gpt-image-2) ==="
+response=$(curl -sf --max-time 180 "${BASE}/v1/images/generations" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","n":1,"response_format":"b64_json"}' 2>&1)
+if RESPONSE="$response" python3 - <<'PY'
+import json
+import os
+payload = json.loads(os.environ["RESPONSE"])
+image = payload["data"][0]["b64_json"]
+assert isinstance(image, str) and len(image) > 1000
+print(f"b64_json length: {len(image)}")
+PY
+then
+    green "PASS"
+    PASS=$((PASS + 1))
+else
+    echo "$response" | head -5
+    red "FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
+# 8. Image edit
+echo ""
+echo "=== Test: Image Edit (gpt-image-2) ==="
+if response=$(python3 - <<'PY'
+import base64
+import binascii
+import json
+import struct
+import urllib.request
+import zlib
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', binascii.crc32(kind + data) & 0xffffffff)
+
+width = height = 8
+raw = b''.join(b'\x00' + b'\xff\x00\x00' * width for _ in range(height))
+png = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) + png_chunk(b'IDAT', zlib.compress(raw)) + png_chunk(b'IEND', b'')
+body = json.dumps({
+    "model": "gpt-image-2",
+    "prompt": "Turn the red square blue",
+    "image": "data:image/png;base64," + base64.b64encode(png).decode(),
+    "size": "1024x1024",
+    "n": 1,
+    "response_format": "b64_json",
+}).encode()
+req = urllib.request.Request(
+    "http://localhost:18888/v1/images/edits",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout=180) as resp:
+    payload = json.load(resp)
+image = payload["data"][0]["b64_json"]
+assert isinstance(image, str) and len(image) > 1000
+print(f"b64_json length: {len(image)}")
+PY
+); then
+    echo "$response"
+    green "PASS"
+    PASS=$((PASS + 1))
+else
+    echo "$response" | head -5
+    red "FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
+# 9. Streaming chat completion
 echo ""
 echo "=== Test: Chat Completion (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/chat/completions" \
@@ -125,7 +199,84 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 8. Responses API (streaming)
+# 10. Responses API image generation shorthand
+echo ""
+echo "=== Test: Responses API Image Generation (gpt-image-2) ==="
+if response=$(curl -sf --max-time 180 "${BASE}/v1/responses" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gpt-image-2","prompt":"A tiny red square icon on a white background","size":"1024x1024","quality":"medium","response_format":"b64_json","stream":false}' 2>&1); then
+    if RESPONSE="$response" python3 - <<'PY'
+import json
+import os
+payload = json.loads(os.environ["RESPONSE"])
+images = [item["result"] for item in payload.get("output", []) if item.get("type") == "image_generation_call" and item.get("result")]
+assert images and len(images[0]) > 1000
+print(f"b64_json length: {len(images[0])}")
+PY
+    then
+        green "PASS"
+        PASS=$((PASS + 1))
+    else
+        echo "$response" | head -5
+        red "FAIL"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "$response" | head -5
+    red "FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
+# 11. Responses API image edit shorthand
+echo ""
+echo "=== Test: Responses API Image Edit (gpt-image-2) ==="
+if response=$(python3 - <<'PY'
+import base64
+import binascii
+import json
+import struct
+import urllib.request
+import zlib
+
+
+def png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', binascii.crc32(kind + data) & 0xffffffff)
+
+width = height = 8
+raw = b''.join(b'\x00' + b'\xff\x00\x00' * width for _ in range(height))
+png = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) + png_chunk(b'IDAT', zlib.compress(raw)) + png_chunk(b'IEND', b'')
+body = json.dumps({
+    "model": "gpt-image-2",
+    "prompt": "Turn the red square blue",
+    "image": "data:image/png;base64," + base64.b64encode(png).decode(),
+    "size": "1024x1024",
+    "quality": "medium",
+    "response_format": "b64_json",
+    "stream": False,
+}).encode()
+req = urllib.request.Request(
+    "http://localhost:18888/v1/responses",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(req, timeout=180) as resp:
+    payload = json.load(resp)
+images = [item["result"] for item in payload.get("output", []) if item.get("type") == "image_generation_call" and item.get("result")]
+assert images and len(images[0]) > 1000
+print(f"b64_json length: {len(images[0])}")
+PY
+); then
+    echo "$response"
+    green "PASS"
+    PASS=$((PASS + 1))
+else
+    echo "$response" | head -5
+    red "FAIL"
+    FAIL=$((FAIL + 1))
+fi
+
+# 12. Responses API (streaming)
 echo ""
 echo "=== Test: Responses API (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/responses" \
@@ -141,13 +292,13 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 9. Anthropic Messages API (non-streaming)
+# 13. Anthropic Messages API (non-streaming)
 run_test "Anthropic Messages (non-streaming)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":100,"messages":[{"role":"user","content":"Say just the word hello"}]}'
 
-# 10. Anthropic Messages API (streaming)
+# 14. Anthropic Messages API (streaming)
 echo ""
 echo "=== Test: Anthropic Messages (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/messages" \
@@ -163,21 +314,21 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 11. Anthropic Messages with thinking
+# 15. Anthropic Messages with thinking
 run_test "Anthropic Messages (with thinking)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
         -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
 
-# 12. Logs stats
+# 16. Logs stats
 run_test "Logs Stats" \
     curl -sf "${BASE}/v1/logs/stats"
 
-# 13. Logs query
+# 17. Logs query
 run_test "Logs Query" \
     curl -sf "${BASE}/v1/logs?limit=2"
 
-# 14. Export JSONL (download)
+# 18. Export JSONL (download)
 echo ""
 echo "=== Test: Export JSONL ==="
 response=$(curl -sf "${BASE}/v1/logs/export" 2>&1)
