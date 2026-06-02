@@ -109,6 +109,35 @@ for model in "${CHAT_MODELS[@]}"; do
             -d "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly OK\"}]}"
 done
 
+# 6b. Reasoning effort mapping
+run_python_check "Reasoning Effort Extra High Mapping" '
+from proxy import _anthropic_to_responses, _chat_to_responses
+
+chat = _chat_to_responses({
+    "model": "gpt-5.5",
+    "messages": [{"role": "user", "content": "Reply OK"}],
+    "reasoning_effort": "extra_high",
+})
+assert chat["reasoning"]["effort"] == "xhigh", chat["reasoning"]
+
+messages = _anthropic_to_responses({
+    "model": "gpt-5.5",
+    "max_tokens": 100,
+    "reasoning_effort": "extra_high",
+    "messages": [{"role": "user", "content": "Reply OK"}],
+})
+assert messages["reasoning"]["effort"] == "xhigh", messages["reasoning"]
+
+thinking = _anthropic_to_responses({
+    "model": "gpt-5.5",
+    "max_tokens": 100,
+    "thinking": {"type": "enabled", "budget_tokens": 20000},
+    "messages": [{"role": "user", "content": "Reply OK"}],
+})
+assert thinking["reasoning"]["effort"] == "xhigh", thinking["reasoning"]
+print("extra_high maps to xhigh")
+'
+
 # 7. Image generation
 echo ""
 echo "=== Test: Image Generation (gpt-image-2) ==="
@@ -190,7 +219,7 @@ echo ""
 echo "=== Test: Chat Completion (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Say just the word hi"}],"stream":true}' 2>&1)
+    -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Say just the word hi"}],"stream":true}' 2>&1)
 if echo "$response" | grep -q "data:"; then
     echo "$response" | head -5
     green "PASS (received SSE data)"
@@ -349,7 +378,7 @@ echo ""
 echo "=== Test: Responses API (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/responses" \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-5.4","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say hey"}]}],"stream":true}' 2>&1)
+    -d '{"model":"gpt-5.5","instructions":"You are a helpful assistant.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Say hey"}]}],"stream":true}' 2>&1)
 if echo "$response" | grep -q "response.output_text.delta"; then
     echo "$response" | grep "output_text.delta" | head -3
     green "PASS (received Responses API events)"
@@ -364,14 +393,14 @@ fi
 run_test "Anthropic Messages (non-streaming)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
-        -d '{"model":"gpt-5.4","max_tokens":100,"messages":[{"role":"user","content":"Say just the word hello"}]}'
+        -d '{"model":"gpt-5.5","max_tokens":100,"messages":[{"role":"user","content":"Say just the word hello"}]}'
 
 # 15. Anthropic Messages API (streaming)
 echo ""
 echo "=== Test: Anthropic Messages (streaming) ==="
 response=$(curl -sN --max-time 30 "${BASE}/v1/messages" \
     -H "Content-Type: application/json" \
-    -d '{"model":"gpt-5.4","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Say just hi"}]}' 2>&1)
+    -d '{"model":"gpt-5.5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"Say just hi"}]}' 2>&1)
 if echo "$response" | grep -q "message_start"; then
     echo "$response" | grep "event:" | head -5
     green "PASS (received Anthropic SSE events)"
@@ -386,7 +415,7 @@ fi
 run_test "Anthropic Messages (with thinking)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
-        -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
+        -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
 
 # 17. Logs stats
 run_test "Logs Stats" \

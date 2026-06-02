@@ -63,17 +63,17 @@ curl http://localhost:18888/v1/models
 # Chat completion
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Hello"}]}'
 
 # Streaming chat completion
 curl -N http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 
 # With reasoning effort control
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"high"}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"extra_high"}'
 
 # Images API generation
 curl http://localhost:18888/v1/images/generations \
@@ -88,7 +88,7 @@ curl http://localhost:18888/v1/images/edits \
 # Responses API canonical image generation
 curl http://localhost:18888/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
+  -d '{"model":"gpt-5.5","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
 
 # Responses API shorthand image generation
 curl http://localhost:18888/v1/responses \
@@ -116,7 +116,7 @@ models = client.models.list()
 
 # Chat completion (with reasoning output)
 resp = client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "What is 15 * 37? Think step by step."}],
 )
 msg = resp.choices[0].message
@@ -125,7 +125,7 @@ print("Answer:", msg.content)
 
 # Streaming (reasoning_content chunks arrive before content chunks)
 for chunk in client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "Hello"}],
     stream=True,
 ):
@@ -139,7 +139,7 @@ for chunk in client.chat.completions.create(
 
 # Function calling
 resp = client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
     tools=[{
         "type": "function",
@@ -168,7 +168,7 @@ client = anthropic.Anthropic(base_url="http://localhost:18888", api_key="any")
 
 # Basic message
 resp = client.messages.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello"}],
 )
@@ -176,9 +176,10 @@ print(resp.content[0].text)
 
 # With extended thinking (reasoning)
 resp = client.messages.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=4096,
-    thinking={"type": "enabled", "budget_tokens": 10000},
+    reasoning_effort="extra_high",
+    thinking={"type": "enabled", "budget_tokens": 20000},
     messages=[{"role": "user", "content": "What is 15 * 37? Show reasoning."}],
 )
 for block in resp.content:
@@ -189,7 +190,7 @@ for block in resp.content:
 
 # Streaming
 with client.messages.stream(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Count to 5"}],
 ) as stream:
@@ -203,17 +204,17 @@ with client.messages.stream(
 # Anthropic Messages API
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 
 # With thinking enabled
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"Solve: 15*37"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"Solve: 15*37"}]}'
 
 # Streaming
 curl -N http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ## Anthropic Messages API
@@ -227,7 +228,7 @@ The server implements the Anthropic Messages API (`/v1/messages` and `/messages`
   "id": "msg_abc123",
   "type": "message",
   "role": "assistant",
-  "model": "gpt-5.4",
+  "model": "gpt-5.5",
   "content": [
     {"type": "thinking", "thinking": "I need to calculate..."},
     {"type": "text", "text": "The answer is 555."}
@@ -278,7 +279,8 @@ Enable thinking via the `thinking` parameter. The `budget_tokens` value is mappe
 |---------------|-------------|
 | <= 2000 | `low` |
 | <= 8000 | `medium` |
-| > 8000 | `high` |
+| <= 16000 | `high` |
+| > 16000 | `xhigh` |
 
 ### Supported Anthropic parameters
 
@@ -290,6 +292,7 @@ Enable thinking via the `thinking` parameter. The `budget_tokens` value is mappe
 | `max_tokens` | Required by Anthropic SDK (silently ignored by Codex) |
 | `stream` | Enable streaming SSE |
 | `thinking` | Extended thinking: `{"type": "enabled", "budget_tokens": N}` |
+| `reasoning_effort` | Server extension: `low`, `medium`, `high`, `extra_high` |
 | `tools` | Tool definitions (Anthropic format with `input_schema`) |
 | `tool_choice` | Tool selection (`auto`, `any`, `tool`) |
 
@@ -337,11 +340,12 @@ Use `reasoning_effort` to control thinking depth:
 | `low` | Minimal thinking, fast responses |
 | `medium` | Balanced (default) |
 | `high` | Deep reasoning |
+| `extra_high` | Maximum reasoning effort, sent to Codex as `xhigh` |
 
 ```bash
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[...],"reasoning_effort":"high"}'
+  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"extra_high"}'
 ```
 
 ## Parameter Compatibility
@@ -358,8 +362,8 @@ The server accepts all standard OpenAI / vLLM Chat Completions parameters. Suppo
 | `tools` | Function/tool definitions |
 | `tool_choice` | Tool selection strategy (`auto`, `none`, `required`, etc.) |
 | `parallel_tool_calls` | Allow parallel function calls |
-| `reasoning_effort` | Thinking depth: `low`, `medium`, `high` |
-| `reasoning` | Advanced: `{"effort": "high", "summary": "detailed"}` |
+| `reasoning_effort` | Thinking depth: `low`, `medium`, `high`, `extra_high` |
+| `reasoning` | Advanced: `{"effort": "extra_high", "summary": "detailed"}` |
 
 ### Silently ignored parameters (no error)
 
@@ -405,7 +409,7 @@ Generated and edited images are also written to the local image directory (defau
 ### Log Query Parameters
 
 ```
-GET /v1/logs?endpoint=chat/completions&model=gpt-5.4&limit=50&offset=0
+GET /v1/logs?endpoint=chat/completions&model=gpt-5.5&limit=50&offset=0
 ```
 
 ### Export to File
@@ -441,13 +445,13 @@ All settings are configurable via environment variables:
 | `CODEX_CLIENT_ID` | *(built-in)* | OAuth client ID for token refresh |
 | `CODEX_DB_PATH` | `~/.codex/api_logs.db` | SQLite database path |
 | `CODEX_EXPORT_DIR` | `~/.codex/exports` | Allowed directory for file exports |
-| `CODEX_DEFAULT_MODEL` | `gpt-5.4` | Default model for unmapped model names |
-| `CODEX_MODEL_ALIASES` | *(none)* | Model name mappings (e.g. `claude-sonnet-4=gpt-5.4`) |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.5` | Default model for unmapped model names |
+| `CODEX_MODEL_ALIASES` | *(none)* | Model name mappings (e.g. `claude-sonnet-4=gpt-5.5`) |
 | `CODEX_MAX_BODY_BYTES` | `10485760` | Max request body size (10 MB) |
 
 ### Model Name Mapping
 
-When using non-Codex model names (e.g. Claude Code sending `claude-sonnet-4-20250514`), the server automatically maps them to the default Codex model (`gpt-5.4`).
+When using non-Codex model names (e.g. Claude Code sending `claude-sonnet-4-20250514`), the server automatically maps them to the default Codex model (`gpt-5.5`).
 
 You can customize mappings via environment variables:
 
@@ -456,7 +460,7 @@ You can customize mappings via environment variables:
 export CODEX_DEFAULT_MODEL=gpt-5.3-codex
 
 # Add explicit model aliases (comma-separated key=value)
-export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.4,claude-haiku=gpt-5.3-codex-spark"
+export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.5,claude-haiku=gpt-5.3-codex-spark"
 ```
 
 ### Security Recommendations

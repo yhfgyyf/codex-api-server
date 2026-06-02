@@ -32,7 +32,7 @@ CODEX_MODELS = [
 ]
 
 # Default model used when incoming model name is not a Codex model
-DEFAULT_CODEX_MODEL = os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5.4")
+DEFAULT_CODEX_MODEL = os.environ.get("CODEX_DEFAULT_MODEL", "gpt-5.5")
 
 # Map non-Codex model names to Codex equivalents
 # Supports Claude, GPT, and other model families

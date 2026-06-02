@@ -61,17 +61,17 @@ curl http://localhost:18888/v1/models
 # 对话补全
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"你好"}]}'
 
 # 流式对话补全
 curl -N http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"你好"}],"stream":true}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"你好"}],"stream":true}'
 
 # 控制推理深度
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"逐步计算 15*37"}],"reasoning_effort":"high"}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"逐步计算 15*37"}],"reasoning_effort":"extra_high"}'
 
 # Images API 生成
 curl http://localhost:18888/v1/images/generations \
@@ -86,7 +86,7 @@ curl http://localhost:18888/v1/images/edits \
 # Responses API 标准图片生成
 curl http://localhost:18888/v1/responses \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
+  -d '{"model":"gpt-5.5","instructions":"You are an image generation assistant.","input":[{"role":"user","content":[{"type":"input_text","text":"A tiny red square icon on a white background"}]}],"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024","quality":"medium"}],"tool_choice":{"type":"image_generation"},"stream":false,"store":false}'
 
 # Responses API 简写图片生成
 curl http://localhost:18888/v1/responses \
@@ -114,7 +114,7 @@ models = client.models.list()
 
 # 对话补全（含推理输出）
 resp = client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "15 乘以 37 等于多少？请逐步推理。"}],
 )
 msg = resp.choices[0].message
@@ -123,7 +123,7 @@ print("回答:", msg.content)
 
 # 流式输出（reasoning_content 在 content 之前到达）
 for chunk in client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "你好"}],
     stream=True,
 ):
@@ -135,7 +135,7 @@ for chunk in client.chat.completions.create(
 
 # 函数调用
 resp = client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     messages=[{"role": "user", "content": "东京现在天气怎么样？"}],
     tools=[{
         "type": "function",
@@ -164,7 +164,7 @@ client = anthropic.Anthropic(base_url="http://localhost:18888", api_key="any")
 
 # 基础消息
 resp = client.messages.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "你好"}],
 )
@@ -172,9 +172,10 @@ print(resp.content[0].text)
 
 # 扩展思考（推理模型）
 resp = client.messages.create(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=4096,
-    thinking={"type": "enabled", "budget_tokens": 10000},
+    reasoning_effort="extra_high",
+    thinking={"type": "enabled", "budget_tokens": 20000},
     messages=[{"role": "user", "content": "15 乘以 37 等于多少？请展示推理过程。"}],
 )
 for block in resp.content:
@@ -185,7 +186,7 @@ for block in resp.content:
 
 # 流式输出
 with client.messages.stream(
-    model="gpt-5.4",
+    model="gpt-5.5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "从 1 数到 5"}],
 ) as stream:
@@ -199,17 +200,17 @@ with client.messages.stream(
 # Anthropic Messages API
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
 
 # 启用思考过程
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":10000},"messages":[{"role":"user","content":"计算 15*37"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"计算 15*37"}]}'
 
 # 流式输出
 curl -N http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ## Anthropic Messages API
@@ -223,7 +224,7 @@ curl -N http://localhost:18888/v1/messages \
   "id": "msg_abc123",
   "type": "message",
   "role": "assistant",
-  "model": "gpt-5.4",
+  "model": "gpt-5.5",
   "content": [
     {"type": "thinking", "thinking": "我需要计算..."},
     {"type": "text", "text": "答案是 555。"}
@@ -274,7 +275,8 @@ data: {"type":"message_stop"}
 |---------------|---------------|
 | <= 2000 | `low`（低） |
 | <= 8000 | `medium`（中） |
-| > 8000 | `high`（高） |
+| <= 16000 | `high`（高） |
+| > 16000 | `xhigh`（超高） |
 
 ### 支持的 Anthropic 参数
 
@@ -286,6 +288,7 @@ data: {"type":"message_stop"}
 | `max_tokens` | Anthropic SDK 必需参数（Codex 静默忽略） |
 | `stream` | 启用流式 SSE |
 | `thinking` | 扩展思考：`{"type": "enabled", "budget_tokens": N}` |
+| `reasoning_effort` | 服务端扩展：`low`、`medium`、`high`、`extra_high` |
 | `tools` | 工具定义（Anthropic 格式，含 `input_schema`） |
 | `tool_choice` | 工具选择策略（`auto`、`any`、`tool`） |
 
@@ -333,11 +336,12 @@ data: [DONE]
 | `low` | 极简思考，快速响应 |
 | `medium` | 平衡模式（默认） |
 | `high` | 深度推理 |
+| `extra_high` | 最高推理强度，转发给 Codex 时使用 `xhigh` |
 
 ```bash
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.4","messages":[...],"reasoning_effort":"high"}'
+  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"extra_high"}'
 ```
 
 ## 参数兼容性
@@ -354,8 +358,8 @@ curl http://localhost:18888/v1/chat/completions \
 | `tools` | 函数/工具定义 |
 | `tool_choice` | 工具选择策略（`auto`、`none`、`required` 等） |
 | `parallel_tool_calls` | 允许并行函数调用 |
-| `reasoning_effort` | 思考深度：`low`、`medium`、`high` |
-| `reasoning` | 高级用法：`{"effort": "high", "summary": "detailed"}` |
+| `reasoning_effort` | 思考深度：`low`、`medium`、`high`、`extra_high` |
+| `reasoning` | 高级用法：`{"effort": "extra_high", "summary": "detailed"}` |
 
 ### 静默忽略的参数（不报错）
 
@@ -401,7 +405,7 @@ curl http://localhost:18888/v1/chat/completions \
 ### 日志查询参数
 
 ```
-GET /v1/logs?endpoint=chat/completions&model=gpt-5.4&limit=50&offset=0
+GET /v1/logs?endpoint=chat/completions&model=gpt-5.5&limit=50&offset=0
 ```
 
 ### 导出到文件
@@ -437,13 +441,13 @@ sqlite3 -header -column ~/.codex/api_logs.db \
 | `CODEX_CLIENT_ID` | *（内置）* | OAuth Client ID |
 | `CODEX_DB_PATH` | `~/.codex/api_logs.db` | SQLite 数据库路径 |
 | `CODEX_EXPORT_DIR` | `~/.codex/exports` | 文件导出目录 |
-| `CODEX_DEFAULT_MODEL` | `gpt-5.4` | 未识别模型名的默认回退模型 |
-| `CODEX_MODEL_ALIASES` | *（无）* | 模型名映射（如 `claude-sonnet-4=gpt-5.4`） |
+| `CODEX_DEFAULT_MODEL` | `gpt-5.5` | 未识别模型名的默认回退模型 |
+| `CODEX_MODEL_ALIASES` | *（无）* | 模型名映射（如 `claude-sonnet-4=gpt-5.5`） |
 | `CODEX_MAX_BODY_BYTES` | `10485760` | 最大请求体大小（10 MB） |
 
 ### 模型名映射
 
-当使用非 Codex 模型名时（例如 Claude Code 发送 `claude-sonnet-4-20250514`），服务器自动映射到默认 Codex 模型（`gpt-5.4`）。
+当使用非 Codex 模型名时（例如 Claude Code 发送 `claude-sonnet-4-20250514`），服务器自动映射到默认 Codex 模型（`gpt-5.5`）。
 
 可通过环境变量自定义映射：
 
@@ -452,7 +456,7 @@ sqlite3 -header -column ~/.codex/api_logs.db \
 export CODEX_DEFAULT_MODEL=gpt-5.3-codex
 
 # 添加显式模型别名（逗号分隔 key=value）
-export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.4,claude-haiku=gpt-5.3-codex-spark"
+export CODEX_MODEL_ALIASES="claude-sonnet-4=gpt-5.5,claude-haiku=gpt-5.3-codex-spark"
 ```
 
 ### 安全建议

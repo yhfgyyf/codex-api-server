@@ -82,6 +82,10 @@ def _convert_tool_calls_message(msg: dict) -> list[dict]:
 
 def _clamp_reasoning_effort(effort: str, model: str) -> str:
     """Clamp reasoning effort to valid range per model."""
+    effort = effort.strip().lower().replace("-", "_")
+    if effort in {"extra_high", "extra high", "x_high"}:
+        effort = "xhigh"
+
     m = model.lower()
     if "5.2" in m or "5.3" in m or "5.4" in m:
         if effort == "minimal":
@@ -100,7 +104,7 @@ def _chat_to_responses(body: dict) -> dict:
     Unsupported params (temperature, top_p, max_tokens, etc.) are silently ignored.
     """
     messages = body.get("messages", [])
-    model = _resolve_model(body.get("model", "gpt-5.4"))
+    model = _resolve_model(body.get("model", DEFAULT_CODEX_MODEL))
 
     system_parts = []
     input_items = []
@@ -221,7 +225,7 @@ def _anthropic_convert_tools(tools: list) -> list:
 
 def _anthropic_to_responses(body: dict) -> dict:
     """Convert Anthropic Messages API request to Codex Responses format."""
-    model = _resolve_model(body.get("model", "gpt-5.4"))
+    model = _resolve_model(body.get("model", DEFAULT_CODEX_MODEL))
     messages = body.get("messages", [])
     system = body.get("system", "")
 
@@ -349,16 +353,23 @@ def _anthropic_to_responses(body: dict) -> dict:
         elif isinstance(tc, str):
             result["tool_choice"] = tc
 
-    # Reasoning — map Anthropic's thinking.budget_tokens to Codex reasoning
+    # Reasoning — accept this server's reasoning_effort extension first, then
+    # map Anthropic's thinking.budget_tokens to Codex reasoning.
+    reasoning_effort = body.get("reasoning_effort")
     thinking = body.get("thinking")
-    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+    if reasoning_effort:
+        effort = _clamp_reasoning_effort(str(reasoning_effort), model)
+        result["reasoning"] = {"effort": effort, "summary": "auto"}
+    elif isinstance(thinking, dict) and thinking.get("type") == "enabled":
         budget = thinking.get("budget_tokens", 10000)
         if budget <= 2000:
             effort = "low"
         elif budget <= 8000:
             effort = "medium"
-        else:
+        elif budget <= 16000:
             effort = "high"
+        else:
+            effort = "xhigh"
         result["reasoning"] = {"effort": effort, "summary": "auto"}
     else:
         result["reasoning"] = {"effort": "high", "summary": "auto"}
@@ -624,7 +635,7 @@ def _normalize_responses_image_body(body: dict) -> dict:
     for image_url in images:
         content.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
     return {
-        "model": "gpt-5.4",
+        "model": DEFAULT_CODEX_MODEL,
         "instructions": body.get("instructions", "You are an image generation assistant."),
         "input": [{"type": "message", "role": "user", "content": content}],
         "tools": [_image_generation_tool(body)],
@@ -963,7 +974,7 @@ class OpenAIProxy:
 
         for _ in range(count):
             codex_body = {
-                "model": "gpt-5.4",
+                "model": DEFAULT_CODEX_MODEL,
                 "instructions": "You are an image generation assistant.",
                 "input": [{
                     "type": "message",
@@ -1056,7 +1067,7 @@ class OpenAIProxy:
         body = _normalize_responses_image_body(body)
         if "error" in body:
             return body
-        model = _resolve_model(body.get("model", "gpt-5.4"))
+        model = _resolve_model(body.get("model", DEFAULT_CODEX_MODEL))
         body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
@@ -1121,7 +1132,7 @@ class OpenAIProxy:
             yield b"data: " + json.dumps(body).encode() + b"\n\n"
             yield b"data: [DONE]\n\n"
             return
-        model = _resolve_model(body.get("model", "gpt-5.4"))
+        model = _resolve_model(body.get("model", DEFAULT_CODEX_MODEL))
         body_copy = _sanitize_responses_body({**body, "model": model, "stream": True, "store": False})
         request_id = f"resp-{uuid.uuid4().hex[:24]}"
         url = _codex_url()
