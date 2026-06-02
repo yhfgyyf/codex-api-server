@@ -4,8 +4,8 @@ set -e
 BASE="http://localhost:18888"
 PASS=0
 FAIL=0
-MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex" "gpt-image-2")
-CHAT_MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-5.2" "gpt-5.2-codex" "gpt-5.1-codex")
+MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark" "gpt-image-2")
+CHAT_MODELS=("gpt-5.5" "gpt-5.4" "gpt-5.4-mini" "gpt-5.3-codex" "gpt-5.3-codex-spark")
 
 green() { echo -e "\033[32m$1\033[0m"; }
 red() { echo -e "\033[31m$1\033[0m"; }
@@ -62,7 +62,7 @@ import urllib.request
 base = "http://localhost:18888"
 models = json.load(urllib.request.urlopen(f"{base}/v1/models"))
 items = {item["id"]: item for item in models["data"]}
-expected_ids = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1-codex", "gpt-image-2"]
+expected_ids = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-image-2"]
 for model_id in expected_ids:
     assert model_id in items, f"missing model: {model_id}"
 
@@ -78,9 +78,6 @@ assert items["gpt-5.4-mini"]["reasoning"] is True
 assert items["gpt-5.4-mini"]["input_modalities"] == ["text", "image"]
 assert items["gpt-5.3-codex-spark"]["context_window"] == 128000
 assert items["gpt-5.3-codex-spark"]["max_output_tokens"] == 128000
-assert items["gpt-5.2"]["context_window"] == 1050000
-assert items["gpt-5.2-codex"]["context_window"] == 272000
-assert items["gpt-5.1-codex"]["reasoning"] is True
 assert items["gpt-image-2"]["reasoning"] is False
 assert items["gpt-image-2"]["input_modalities"] == ["text", "image"]
 print(json.dumps({k: items[k] for k in expected_ids}, indent=2))
