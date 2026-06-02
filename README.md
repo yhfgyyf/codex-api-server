@@ -73,7 +73,7 @@ curl -N http://localhost:18888/v1/chat/completions \
 # With reasoning effort control
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"extra_high"}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"Solve this step by step: 15*37"}],"reasoning_effort":"xhigh"}'
 
 # Images API generation
 curl http://localhost:18888/v1/images/generations \
@@ -178,7 +178,7 @@ print(resp.content[0].text)
 resp = client.messages.create(
     model="gpt-5.5",
     max_tokens=4096,
-    reasoning_effort="extra_high",
+    reasoning_effort="xhigh",
     thinking={"type": "enabled", "budget_tokens": 20000},
     messages=[{"role": "user", "content": "What is 15 * 37? Show reasoning."}],
 )
@@ -209,7 +209,7 @@ curl http://localhost:18888/v1/messages \
 # With thinking enabled
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"Solve: 15*37"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"xhigh","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"Solve: 15*37"}]}'
 
 # Streaming
 curl -N http://localhost:18888/v1/messages \
@@ -292,11 +292,11 @@ Enable thinking via the `thinking` parameter. The `budget_tokens` value is mappe
 | `max_tokens` | Required by Anthropic SDK (silently ignored by Codex) |
 | `stream` | Enable streaming SSE |
 | `thinking` | Extended thinking: `{"type": "enabled", "budget_tokens": N}` |
-| `reasoning_effort` | Server extension: `low`, `medium`, `high`, `extra_high` |
 | `tools` | Tool definitions (Anthropic format with `input_schema`) |
 | `tool_choice` | Tool selection (`auto`, `any`, `tool`) |
+| `temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata`, `service_tier`, `container`, `mcp_servers` | Accepted for SDK compatibility and ignored by Codex |
 
-Other Anthropic-specific parameters (`temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata`) are silently ignored.
+Server extension: `reasoning_effort` accepts `low`, `medium`, `high`, or `xhigh` and overrides the `thinking.budget_tokens` mapping.
 
 ## Reasoning Model Support
 
@@ -340,12 +340,12 @@ Use `reasoning_effort` to control thinking depth:
 | `low` | Minimal thinking, fast responses |
 | `medium` | Balanced (default) |
 | `high` | Deep reasoning |
-| `extra_high` | Maximum reasoning effort, sent to Codex as `xhigh` |
+| `xhigh` | Maximum reasoning effort |
 
 ```bash
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"extra_high"}'
+  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"xhigh"}'
 ```
 
 ## Parameter Compatibility
@@ -362,8 +362,8 @@ The server accepts all standard OpenAI / vLLM Chat Completions parameters. Suppo
 | `tools` | Function/tool definitions |
 | `tool_choice` | Tool selection strategy (`auto`, `none`, `required`, etc.) |
 | `parallel_tool_calls` | Allow parallel function calls |
-| `reasoning_effort` | Thinking depth: `low`, `medium`, `high`, `extra_high` |
-| `reasoning` | Advanced: `{"effort": "extra_high", "summary": "detailed"}` |
+| `reasoning_effort` | Thinking depth: `low`, `medium`, `high`, `xhigh` |
+| `reasoning` | Advanced: `{"effort": "xhigh", "summary": "detailed"}` |
 
 ### Silently ignored parameters (no error)
 

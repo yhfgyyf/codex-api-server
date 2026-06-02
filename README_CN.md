@@ -71,7 +71,7 @@ curl -N http://localhost:18888/v1/chat/completions \
 # 控制推理深度
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"逐步计算 15*37"}],"reasoning_effort":"extra_high"}'
+  -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"逐步计算 15*37"}],"reasoning_effort":"xhigh"}'
 
 # Images API 生成
 curl http://localhost:18888/v1/images/generations \
@@ -174,7 +174,7 @@ print(resp.content[0].text)
 resp = client.messages.create(
     model="gpt-5.5",
     max_tokens=4096,
-    reasoning_effort="extra_high",
+    reasoning_effort="xhigh",
     thinking={"type": "enabled", "budget_tokens": 20000},
     messages=[{"role": "user", "content": "15 乘以 37 等于多少？请展示推理过程。"}],
 )
@@ -205,7 +205,7 @@ curl http://localhost:18888/v1/messages \
 # 启用思考过程
 curl http://localhost:18888/v1/messages \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"计算 15*37"}]}'
+  -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"xhigh","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"计算 15*37"}]}'
 
 # 流式输出
 curl -N http://localhost:18888/v1/messages \
@@ -288,11 +288,11 @@ data: {"type":"message_stop"}
 | `max_tokens` | Anthropic SDK 必需参数（Codex 静默忽略） |
 | `stream` | 启用流式 SSE |
 | `thinking` | 扩展思考：`{"type": "enabled", "budget_tokens": N}` |
-| `reasoning_effort` | 服务端扩展：`low`、`medium`、`high`、`extra_high` |
 | `tools` | 工具定义（Anthropic 格式，含 `input_schema`） |
 | `tool_choice` | 工具选择策略（`auto`、`any`、`tool`） |
+| `temperature`、`top_p`、`top_k`、`stop_sequences`、`metadata`、`service_tier`、`container`、`mcp_servers` | 为 SDK 兼容而接受，Codex 会静默忽略 |
 
-其他 Anthropic 特有参数（`temperature`、`top_p`、`top_k`、`stop_sequences`、`metadata`）静默忽略。
+服务端扩展：`reasoning_effort` 支持 `low`、`medium`、`high`、`xhigh`，并优先于 `thinking.budget_tokens` 映射。
 
 ## 推理模型支持
 
@@ -336,12 +336,12 @@ data: [DONE]
 | `low` | 极简思考，快速响应 |
 | `medium` | 平衡模式（默认） |
 | `high` | 深度推理 |
-| `extra_high` | 最高推理强度，转发给 Codex 时使用 `xhigh` |
+| `xhigh` | 最高推理强度 |
 
 ```bash
 curl http://localhost:18888/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"extra_high"}'
+  -d '{"model":"gpt-5.5","messages":[...],"reasoning_effort":"xhigh"}'
 ```
 
 ## 参数兼容性
@@ -358,8 +358,8 @@ curl http://localhost:18888/v1/chat/completions \
 | `tools` | 函数/工具定义 |
 | `tool_choice` | 工具选择策略（`auto`、`none`、`required` 等） |
 | `parallel_tool_calls` | 允许并行函数调用 |
-| `reasoning_effort` | 思考深度：`low`、`medium`、`high`、`extra_high` |
-| `reasoning` | 高级用法：`{"effort": "extra_high", "summary": "detailed"}` |
+| `reasoning_effort` | 思考深度：`low`、`medium`、`high`、`xhigh` |
+| `reasoning` | 高级用法：`{"effort": "xhigh", "summary": "detailed"}` |
 
 ### 静默忽略的参数（不报错）
 

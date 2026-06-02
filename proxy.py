@@ -83,7 +83,7 @@ def _convert_tool_calls_message(msg: dict) -> list[dict]:
 def _clamp_reasoning_effort(effort: str, model: str) -> str:
     """Clamp reasoning effort to valid range per model."""
     effort = effort.strip().lower().replace("-", "_")
-    if effort in {"extra_high", "extra high", "x_high"}:
+    if effort == "x_high":
         effort = "xhigh"
 
     m = model.lower()
@@ -223,6 +223,49 @@ def _anthropic_convert_tools(tools: list) -> list:
     return codex_tools
 
 
+def _anthropic_image_to_responses_part(block: dict) -> dict | None:
+    source = block.get("source")
+    if not isinstance(source, dict):
+        return None
+
+    if source.get("type") == "base64":
+        media_type = source.get("media_type", "image/png")
+        data = source.get("data")
+        if isinstance(data, str) and data:
+            return {
+                "type": "input_image",
+                "image_url": f"data:{media_type};base64,{data}",
+                "detail": "auto",
+            }
+    if source.get("type") == "url":
+        url = source.get("url")
+        if isinstance(url, str) and url:
+            return {"type": "input_image", "image_url": url, "detail": "auto"}
+    return None
+
+
+def _anthropic_content_to_responses_parts(content: object) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    if not isinstance(content, list):
+        return [{"type": "input_text", "text": str(content)}]
+
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append({"type": "input_text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            parts.append({"type": "input_text", "text": block.get("text", "")})
+        elif block.get("type") == "image":
+            image_part = _anthropic_image_to_responses_part(block)
+            if image_part:
+                parts.append(image_part)
+    return parts or [{"type": "input_text", "text": ""}]
+
+
 def _anthropic_to_responses(body: dict) -> dict:
     """Convert Anthropic Messages API request to Codex Responses format."""
     model = _resolve_model(body.get("model", DEFAULT_CODEX_MODEL))
@@ -265,27 +308,26 @@ def _anthropic_to_responses(body: dict) -> dict:
                         })
                 continue
 
-        # Extract text from content (string or array of blocks)
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            text = "\n".join(text_parts)
-        else:
-            text = str(content)
-
         if role == "user":
             input_items.append({
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": text}],
+                "content": _anthropic_content_to_responses_parts(content),
             })
         elif role == "assistant":
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
+                text = "\n".join(text_parts)
+            else:
+                text = str(content)
+
             # Check for tool_use blocks — function_call must be top-level input items
             if isinstance(content, list):
                 text_parts = []
@@ -360,6 +402,10 @@ def _anthropic_to_responses(body: dict) -> dict:
     if reasoning_effort:
         effort = _clamp_reasoning_effort(str(reasoning_effort), model)
         result["reasoning"] = {"effort": effort, "summary": "auto"}
+    elif isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        pass
+    elif isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+        result["reasoning"] = {"effort": "xhigh", "summary": "auto"}
     elif isinstance(thinking, dict) and thinking.get("type") == "enabled":
         budget = thinking.get("budget_tokens", 10000)
         if budget <= 2000:

@@ -116,14 +116,14 @@ from proxy import _anthropic_to_responses, _chat_to_responses
 chat = _chat_to_responses({
     "model": "gpt-5.5",
     "messages": [{"role": "user", "content": "Reply OK"}],
-    "reasoning_effort": "extra_high",
+    "reasoning_effort": "xhigh",
 })
 assert chat["reasoning"]["effort"] == "xhigh", chat["reasoning"]
 
 messages = _anthropic_to_responses({
     "model": "gpt-5.5",
     "max_tokens": 100,
-    "reasoning_effort": "extra_high",
+    "reasoning_effort": "xhigh",
     "messages": [{"role": "user", "content": "Reply OK"}],
 })
 assert messages["reasoning"]["effort"] == "xhigh", messages["reasoning"]
@@ -135,7 +135,7 @@ thinking = _anthropic_to_responses({
     "messages": [{"role": "user", "content": "Reply OK"}],
 })
 assert thinking["reasoning"]["effort"] == "xhigh", thinking["reasoning"]
-print("extra_high maps to xhigh")
+print("xhigh reasoning effort ok")
 '
 
 # 7. Image generation
@@ -415,7 +415,7 @@ fi
 run_test "Anthropic Messages (with thinking)" \
     curl -sf --max-time 60 "${BASE}/v1/messages" \
         -H "Content-Type: application/json" \
-        -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"extra_high","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
+        -d '{"model":"gpt-5.5","max_tokens":4096,"reasoning_effort":"xhigh","thinking":{"type":"enabled","budget_tokens":20000},"messages":[{"role":"user","content":"What is 99+1? Show reasoning."}]}'
 
 # 17. Logs stats
 run_test "Logs Stats" \
