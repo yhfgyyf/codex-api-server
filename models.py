@@ -36,23 +36,6 @@ MODEL_METADATA: dict[str, dict[str, Any]] = {
         "reasoning": True,
         "input_modalities": ["text"],
     },
-    "gpt-5.2": {
-        "context_window": 1_050_000,
-        "max_output_tokens": 128_000,
-        "reasoning": True,
-        "input_modalities": ["text", "image"],
-    },
-    "gpt-5.2-codex": {
-        "context_window": 272_000,
-        "max_output_tokens": 128_000,
-        "reasoning": True,
-        "input_modalities": ["text", "image"],
-    },
-    "gpt-5.1-codex": {
-        "max_output_tokens": 128_000,
-        "reasoning": True,
-        "input_modalities": ["text", "image"],
-    },
     "gpt-image-2": {
         "reasoning": False,
         "input_modalities": ["text", "image"],
